@@ -62,7 +62,7 @@ Attach first (you need the URL), then `create` with `body_html` that references 
 Folio rewrites image URLs at render time. Use the **relative** form `/t/<thread>/asset/<filename>` inside `body_html`, NOT the absolute `url` from the `attach_asset` response.
 
 - A relative URL renders correctly under whatever origin the user is viewing the note from — local viewer (`127.0.0.1:4810`), reverse-proxied public host, Tailscale Funnel, capability URL on cloud — all transparent.
-- The absolute `url` returned by `attach_asset` is built from `viewer_public_url` in config. If a recipient browses through a DIFFERENT host (Tailscale interface, alias domain, capability URL on a different cloud), absolute URLs break.
+- The absolute `url` returned by `attach_asset` is built from `viewer_public_url` in config. Without `viewer_public_url` it is just the relative `/t/<thread>/asset/<file>` path (Folio never hands out a `127.0.0.1` address as shareable); `local_url` stays for this machine only. If a recipient browses through a DIFFERENT host (Tailscale interface, alias domain, capability URL on a different cloud), absolute URLs break.
 - Capability URL rewrites (`/p/<token>/t/.../asset/...`) hook on the `/t/<thread>/asset/<file>` substring — relative or absolute both match, but relative produces cleaner output.
 
 ```html
