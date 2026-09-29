@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { createNote } from "../../core/storage";
-import { loadConfig } from "../../core/config";
+import { loadConfig, viewerLocalBaseUrl, viewerShareableBaseUrl } from "../../core/config";
+import { shareHint } from "../../core/sync";
 import { c, out, json } from "../io";
 import type { CreateNoteInput, NoteType } from "../../core/types";
 
@@ -79,14 +80,26 @@ export async function newNote(opts: NewOpts): Promise<number> {
   };
 
   const note = await createNote(input);
+  const localUrl = `${viewerLocalBaseUrl(cfg)}/n/${note.id}`;
+  const publicBase = viewerShareableBaseUrl(cfg);
+  const publicUrl = publicBase ? `${publicBase}/n/${note.id}` : null;
   if (opts.jsonOut) {
-    json({ ...note, local_url: `http://${cfg.viewer_host}:${cfg.viewer_port}/n/${note.id}` });
+    // Same link contract as the MCP create tool (sc-6716): public_url only
+    // from viewer_public_url, else null + share_hint.
+    json({
+      ...note,
+      local_url: localUrl,
+      public_url: publicUrl,
+      ...(publicUrl ? {} : { share_hint: shareHint(note.id, "cli") }),
+    });
   } else {
     out(c.ok("✓") + ` Created ${c.bold(note.title)}`);
     out(`  ${c.dim("id   ")} ${note.id}`);
     out(`  ${c.dim("type ")} ${note.type}  ${c.dim("theme")} ${note.theme}  ${c.dim("thread")} ${note.thread_id}`);
     out(`  ${c.dim("path ")} ~/Folio/${note.path}`);
-    out(`  ${c.dim("url  ")} ${c.cyan(`http://${cfg.viewer_host}:${cfg.viewer_port}/n/${note.id}`)}`);
+    out(`  ${c.dim("url  ")} ${c.cyan(localUrl)}`);
+    if (publicUrl) out(`  ${c.dim("pub  ")} ${c.cyan(publicUrl)}`);
+    else out(`  ${c.dim("share")} ${c.dim(shareHint(note.id, "cli"))}`);
   }
   return 0;
 }

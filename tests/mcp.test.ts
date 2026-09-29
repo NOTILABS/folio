@@ -27,6 +27,21 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
   return await handler({ method: "tools/call", params: { name, arguments: args } });
 }
 
+/** Minimal sync state = "paired with a cloud" for shareHint(). */
+async function pairWithCloud() {
+  // auto_sync off so the create/replace write hook doesn't try to reach the fake remote.
+  const { saveConfig, loadConfig } = await import("../src/core/config");
+  await saveConfig({ ...(await loadConfig()), auto_sync: false });
+  const { saveSyncState } = await import("../src/core/sync");
+  saveSyncState({
+    remote: "https://folio.example.com",
+    device_token: "test-token",
+    last_pulled_seq: 0,
+    last_pushed_at: null,
+    last_live_pushed: {},
+  });
+}
+
 async function listTools() {
   const { buildServer } = await import("../src/mcp/server");
   const server = await buildServer();
@@ -120,8 +135,31 @@ test("replace tool returns ok + valid URLs (regression: cfg must be loaded)", as
   expect(data.old_id).toBe(id);
   expect(typeof data.new_id).toBe("string");
   expect(data.new_local_url).toMatch(/^http:\/\/.+\/n\/.+/);
-  expect(data.new_public_url).toMatch(/^https?:\/\/.+\/n\/.+/);
+  // No viewer_public_url → no shareable URL, only the hint (sc-6716).
+  expect(data.new_public_url).toBeNull();
+  expect(data.share_hint).toContain("not paired");
   expect(data.old_local_url).toContain(`/n/${id}`);
+});
+
+test("replace uses viewer_public_url for new_public_url when configured", async () => {
+  const { saveConfig, loadConfig } = await import("../src/core/config");
+  await saveConfig({ ...(await loadConfig()), viewer_public_url: "https://notes.example.com" });
+  const c = await callTool("create", { type: "snippet", title: "Orig", body_html: "<p>one</p>" });
+  const { id } = JSON.parse(c.content[0].text);
+  const r = await callTool("replace", { old_id: id, body_html: "<p>two</p>" });
+  const data = JSON.parse(r.content[0].text);
+  expect(data.new_public_url).toBe(`https://notes.example.com/n/${data.new_id}`);
+  expect(data.share_hint).toBeUndefined();
+});
+
+test("replace without viewer_public_url but paired → share_hint points at publish", async () => {
+  await pairWithCloud();
+  const c = await callTool("create", { type: "snippet", title: "Orig", body_html: "<p>one</p>" });
+  const { id } = JSON.parse(c.content[0].text);
+  const r = await callTool("replace", { old_id: id, body_html: "<p>two</p>" });
+  const data = JSON.parse(r.content[0].text);
+  expect(data.new_public_url).toBeNull();
+  expect(data.share_hint).toContain(`publish({ id: "${data.new_id}" })`);
 });
 
 test("export standalone inlines theme CSS", async () => {
@@ -232,12 +270,30 @@ test("create rejects invalid type", async () => {
   expect(res.isError).toBe(true);
 });
 
-test("create returns public_url equal to local_url when no viewer_public_url set", async () => {
+// sc-6716: without viewer_public_url the local address must never pose as the
+// shareable link — public_url is null and share_hint says what to do instead.
+test("create without viewer_public_url, unpaired: public_url null + hint that no external link exists", async () => {
   const res = await callTool("create", { type: "snippet", title: "Default base", body_html: "<p>x</p>" });
   expect(res.isError).toBeFalsy();
   const data = JSON.parse(res.content[0].text);
-  expect(data.public_url).toBe(data.local_url);
-  expect(data.response_hint).toContain(`MEDIA:${data.public_url}`);
+  expect(data.local_url).toBe(`http://127.0.0.1:4810/n/${data.id}`);
+  expect(data.public_url).toBeNull();
+  expect(data.share_hint).toContain("No external link available");
+  expect(data.share_hint).toContain("not paired");
+  expect(data.response_hint).not.toContain("MEDIA:");
+  expect(data.response_hint).not.toContain("127.0.0.1");
+  expect(data.response_hint).toContain("share_hint");
+});
+
+test("create without viewer_public_url, paired with cloud: public_url null + hint to publish", async () => {
+  await pairWithCloud();
+  const res = await callTool("create", { type: "snippet", title: "Paired", body_html: "<p>x</p>" });
+  expect(res.isError).toBeFalsy();
+  const data = JSON.parse(res.content[0].text);
+  expect(data.public_url).toBeNull();
+  expect(data.share_hint).toContain(`publish({ id: "${data.id}" })`);
+  expect(data.share_hint).toContain("127.0.0.1");
+  expect(data.response_hint).not.toContain("127.0.0.1");
 });
 
 test("create uses viewer_public_url when configured", async () => {
@@ -251,6 +307,7 @@ test("create uses viewer_public_url when configured", async () => {
   expect(data.local_url).toContain("127.0.0.1");
   expect(data.local_url).not.toContain("notes.example.com");
   expect(data.response_hint).toContain(`MEDIA:https://notes.example.com/n/${data.id}`);
+  expect(data.share_hint).toBeUndefined();
 });
 
 test("create strips trailing slash from viewer_public_url", async () => {
@@ -270,6 +327,13 @@ test("version tool exposes both viewer_url and public_url", async () => {
   const data = JSON.parse(res.content[0].text);
   expect(data.viewer_url).toMatch(/^http:\/\/127\.0\.0\.1:/);
   expect(data.public_url).toBe("https://notes.example.com");
+});
+
+test("version tool: public_url null when viewer_public_url is not set", async () => {
+  const res = await callTool("version", {});
+  const data = JSON.parse(res.content[0].text);
+  expect(data.viewer_url).toMatch(/^http:\/\/127\.0\.0\.1:/);
+  expect(data.public_url).toBeNull();
 });
 
 test("search after create finds the note", async () => {

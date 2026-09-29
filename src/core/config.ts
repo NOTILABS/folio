@@ -46,10 +46,23 @@ export function viewerLocalBaseUrl(cfg: FolioConfig): string {
   return `http://${cfg.viewer_host}:${cfg.viewer_port}`;
 }
 
-export function viewerPublicBaseUrl(cfg: FolioConfig): string {
+/**
+ * Externally reachable viewer base — the configured `viewer_public_url`
+ * (trailing slash stripped), or null when none is set. Never falls back to
+ * the local address: anything an agent may relay to a human (MCP
+ * `public_url`, `new_public_url`, `stream_url`, the MEDIA hint) must come
+ * from here, because http://127.0.0.1:<port> only opens on this machine.
+ */
+export function viewerShareableBaseUrl(cfg: FolioConfig): string | null {
   const pub = cfg.viewer_public_url?.trim();
-  if (pub) return pub.replace(/\/+$/, "");
-  return viewerLocalBaseUrl(cfg);
+  return pub ? pub.replace(/\/+$/, "") : null;
+}
+
+/** Base URL for display on this machine (viewer banner): the public base
+ *  when configured, else the local one. Not for links sent to people — use
+ *  viewerShareableBaseUrl() for those. */
+export function viewerPublicBaseUrl(cfg: FolioConfig): string {
+  return viewerShareableBaseUrl(cfg) ?? viewerLocalBaseUrl(cfg);
 }
 
 export function folioRoot(): string {

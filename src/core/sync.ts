@@ -87,6 +87,25 @@ export function loadSyncState(): SyncState | null {
   }
 }
 
+/**
+ * Instruction for the agent when there is no externally reachable base URL
+ * (no `viewer_public_url`), so `public_url` is null. A link that opens
+ * outside this machine then only comes from a capability share (`publish`,
+ * /p/<token>/n/<id>) — the cloud's own /n/<uuid> needs a paired browser.
+ * Without cloud pairing there is no external link at all. `via` picks the
+ * wording: MCP tool call vs CLI command.
+ */
+export function shareHint(id: string, via: "mcp" | "cli" = "mcp"): string {
+  const local = "local_url (127.0.0.1) opens only on this machine";
+  if (loadSyncState()) {
+    const how = via === "mcp"
+      ? `call publish({ id: "${id}" }) and send the url from its response`
+      : `run \`folio publish ${id}\` and send the URL it prints`;
+    return `No public viewer URL configured; ${local}. For a link that opens anywhere else, ${how}.`;
+  }
+  return `No external link available: no viewer_public_url and Folio is not paired with a cloud (folio sync pair). ${local} — don't send it to anyone reading elsewhere.`;
+}
+
 export function saveSyncState(state: SyncState): void {
   const p = statePath();
   if (!existsSync(dirname(p))) mkdirSync(dirname(p), { recursive: true });

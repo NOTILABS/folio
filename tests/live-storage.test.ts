@@ -54,7 +54,16 @@ test("create live note: empty body_html allowed; live flag persists; stream_url 
   const data = JSON.parse(r.content[0].text);
   expect(data.live).toBe(true);
   expect(data.local_stream_url).toContain(`/n/${data.id}/stream`);
-  expect(data.stream_url).toContain(`/n/${data.id}/stream`);
+  // No viewer_public_url → no shareable stream URL (sc-6716).
+  expect(data.stream_url).toBeNull();
+});
+
+test("create live note: stream_url uses viewer_public_url when configured", async () => {
+  const { saveConfig, loadConfig } = await import("../src/core/config");
+  await saveConfig({ ...(await loadConfig()), viewer_public_url: "https://notes.example.com" });
+  const r = await callTool("create", { type: "journal", title: "Public feed", body_html: "", live: true });
+  const data = JSON.parse(r.content[0].text);
+  expect(data.stream_url).toBe(`https://notes.example.com/n/${data.id}/stream`);
 });
 
 test("create non-live rejects empty body_html", async () => {
