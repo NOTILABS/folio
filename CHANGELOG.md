@@ -2,7 +2,7 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
-## Unreleased
+## v0.43.0 — 2026-09-29
 
 **Changed — no more `127.0.0.1` posing as a shareable link (sc-6716).** Without `viewer_public_url`, `create` returned `public_url` = `local_url` = `http://127.0.0.1:4810/n/<id>` and a `response_hint` telling the agent to send it as `MEDIA:` — even with cloud sync paired. Relayed to a phone or another LAN, that link is dead. Now the local address is never presented as public.
 
