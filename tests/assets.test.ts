@@ -53,7 +53,8 @@ test("attach_asset writes file, returns url + path + size_bytes (content_base64)
   expect(data.path).toContain("threads/test-thread/assets/shot.png");
   expect(existsSync(data.path)).toBe(true);
   expect(data.size_bytes).toBe(PNG_1x1.length);
-  expect(data.url).toContain("/t/test-thread/asset/shot.png");
+  // No viewer_public_url → relative path, never a 127.0.0.1 "shareable" URL (sc-6716).
+  expect(data.url).toBe("/t/test-thread/asset/shot.png");
   expect(data.local_url).toContain("127.0.0.1");
 });
 

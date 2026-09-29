@@ -27,8 +27,8 @@ import {
   suggestThread,
   stats,
 } from "../core/storage";
-import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerLocalBaseUrl, viewerPublicBaseUrl, threadAssetsDir, isSafeAssetFilename } from "../core/config";
-import { scheduleAutoSync } from "../core/sync";
+import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerLocalBaseUrl, viewerShareableBaseUrl, threadAssetsDir, isSafeAssetFilename } from "../core/config";
+import { scheduleAutoSync, shareHint } from "../core/sync";
 import { listThemes, getTheme } from "../core/themes";
 import { db, logEvent } from "../core/db";
 import { renderRecipe, validateRecipe } from "../core/recipe";
@@ -116,7 +116,7 @@ const tools: Tool[] = [
   {
     name: "create",
     description:
-      "Create a new Folio note (HTML communication artifact). Agents call this when they want to give the user a visually-rich response (research, comparison, technical doc). Note: append-only — you cannot edit; new iteration = new note in same thread.",
+      "Create a new Folio note (HTML communication artifact). Agents call this when they want to give the user a visually-rich response (research, comparison, technical doc). Note: append-only — you cannot edit; new iteration = new note in same thread. Links: public_url is null unless viewer_public_url is configured — then follow share_hint (with a paired cloud: publish) to get a link for the user; local_url (127.0.0.1) opens only on this machine, never send it to someone elsewhere.",
     inputSchema: {
       type: "object",
       required: ["type", "title"],
@@ -385,7 +385,7 @@ const tools: Tool[] = [
   },
   {
     name: "attach_asset",
-    description: "Attach a binary asset (image, PDF, video) to a thread. Stores to threads/<thread_id>/assets/<filename> and returns a stable URL the agent can reference in body_html (e.g. <img src='<url>'>). One of content_base64 or source_path is required. Filename must be ^[a-zA-Z0-9._-]+$ (no path separators); extensions allowed: jpg/jpeg/png/webp/gif/svg/pdf/mp4. Append-only: re-attaching the same filename overwrites. URL uses the configured viewer_public_url when set so it works for relayed contexts (Telegram, email).",
+    description: "Attach a binary asset (image, PDF, video) to a thread. Stores to threads/<thread_id>/assets/<filename> and returns a stable URL the agent can reference in body_html (e.g. <img src='<url>'>). One of content_base64 or source_path is required. Filename must be ^[a-zA-Z0-9._-]+$ (no path separators); extensions allowed: jpg/jpeg/png/webp/gif/svg/pdf/mp4. Append-only: re-attaching the same filename overwrites. URL is absolute on the configured viewer_public_url when set (for relayed contexts: Telegram, email); otherwise it is the relative /t/<thread>/asset/<file> path (never 127.0.0.1).",
     inputSchema: {
       type: "object",
       required: ["thread_id", "filename"],
@@ -496,14 +496,17 @@ export async function buildServer(): Promise<Server> {
           });
           const cfg = await loadConfig();
           const localUrl = `${viewerLocalBaseUrl(cfg)}/n/${note.id}`;
-          const publicUrl = `${viewerPublicBaseUrl(cfg)}/n/${note.id}`;
+          const publicBase = viewerShareableBaseUrl(cfg);
+          const publicUrl = publicBase ? `${publicBase}/n/${note.id}` : null;
           const response: Record<string, unknown> = {
             id: note.id,
             slug: note.slug,
             path: note.path,
             // local_url stays for back-compat (always 127.0.0.1:<port>); public_url
-            // is what relays/bots should surface — equals local_url when no public
-            // base configured, else the configured viewer_public_url.
+            // is what relays/bots should surface — the configured viewer_public_url,
+            // or null when none is set (sc-6716: never the local address; a
+            // relayed 127.0.0.1 link is dead for the recipient). When null,
+            // share_hint says how to get a working link (publish) or that none exists.
             local_url: localUrl,
             public_url: publicUrl,
             thread_id: note.thread_id,
@@ -511,13 +514,17 @@ export async function buildServer(): Promise<Server> {
             theme_profile: note.theme_profile,
             expires_at: note.expires_at,
             live: note.live,
-            // Hint to agent: include in MEDIA: response convention. Uses public_url
-            // so relays (Telegram, email, Slack) don't paste localhost URLs.
-            response_hint: `Respond to user with: "MEDIA:${publicUrl}" + 3-5 line TL;DR.`,
+            // Hint to agent: include in MEDIA: response convention. Built only
+            // from public_url so relays (Telegram, email, Slack) never paste
+            // localhost URLs; without one it points at publish instead.
+            response_hint: publicUrl
+              ? `Respond to user with: "MEDIA:${publicUrl}" + 3-5 line TL;DR.`
+              : `Respond to user with a 3-5 line TL;DR plus a link from share_hint — not local_url unless the user reads on this machine.`,
           };
+          if (!publicUrl) response.share_hint = shareHint(note.id);
           if (note.live) {
             response.local_stream_url = `${viewerLocalBaseUrl(cfg)}/n/${note.id}/stream`;
-            response.stream_url = `${viewerPublicBaseUrl(cfg)}/n/${note.id}/stream`;
+            response.stream_url = publicBase ? `${publicBase}/n/${note.id}/stream` : null;
           }
           scheduleAutoSync(); // v0.33: push the new note in the background
           return jsonContent(response);
@@ -714,14 +721,18 @@ export async function buildServer(): Promise<Server> {
           // access threw (`cfg.viewer_host`) on any replace call.
           const cfg = await loadConfig();
           scheduleAutoSync();
+          const newId = result.new_meta!.id;
+          const publicBase = viewerShareableBaseUrl(cfg);
           return jsonContent({
             ok: true,
             old_id: result.old_id,
-            new_id: result.new_meta!.id,
+            new_id: newId,
             new_slug: result.new_meta!.slug,
-            new_local_url: `${viewerLocalBaseUrl(cfg)}/n/${result.new_meta!.id}`,
-            new_public_url: `${viewerPublicBaseUrl(cfg)}/n/${result.new_meta!.id}`,
+            new_local_url: `${viewerLocalBaseUrl(cfg)}/n/${newId}`,
+            // null without viewer_public_url (sc-6716) — see share_hint.
+            new_public_url: publicBase ? `${publicBase}/n/${newId}` : null,
             old_local_url: `${viewerLocalBaseUrl(cfg)}/n/${result.old_id}`,
+            ...(publicBase ? {} : { share_hint: shareHint(newId) }),
           });
         }
 
@@ -977,7 +988,7 @@ export async function buildServer(): Promise<Server> {
             version: pkg.version,
             folio_root: folioRoot(),
             viewer_url: viewerLocalBaseUrl(cfg),
-            public_url: viewerPublicBaseUrl(cfg),
+            public_url: viewerShareableBaseUrl(cfg), // null when not configured
             default_theme: cfg.theme,
             default_lifespan_days: cfg.default_lifespan_days,
           });
@@ -1017,8 +1028,13 @@ export async function buildServer(): Promise<Server> {
           writeFileSync(dest, bytes);
           const size_bytes = statSync(dest).size;
           const cfg = await loadConfig();
-          const url = `${viewerPublicBaseUrl(cfg)}/t/${encodeURIComponent(thread_id)}/asset/${encodeURIComponent(filename)}`;
-          const local_url = `${viewerLocalBaseUrl(cfg)}/t/${encodeURIComponent(thread_id)}/asset/${encodeURIComponent(filename)}`;
+          const assetPath = `/t/${encodeURIComponent(thread_id)}/asset/${encodeURIComponent(filename)}`;
+          // Absolute only with a configured public base; otherwise the
+          // relative path — the form body_html should use anyway, and never a
+          // 127.0.0.1 address posing as shareable (sc-6716).
+          const publicBase = viewerShareableBaseUrl(cfg);
+          const url = publicBase ? `${publicBase}${assetPath}` : assetPath;
+          const local_url = `${viewerLocalBaseUrl(cfg)}${assetPath}`;
           return jsonContent({
             thread_id,
             filename,

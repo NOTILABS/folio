@@ -2,6 +2,21 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## Unreleased
+
+**Changed — no more `127.0.0.1` posing as a shareable link (sc-6716).** Without `viewer_public_url`, `create` returned `public_url` = `local_url` = `http://127.0.0.1:4810/n/<id>` and a `response_hint` telling the agent to send it as `MEDIA:` — even with cloud sync paired. Relayed to a phone or another LAN, that link is dead. Now the local address is never presented as public.
+
+### Changed
+
+- **MCP `create`**: `public_url` is `null` when `viewer_public_url` is not set (was: the local URL). A new **`share_hint`** field says what to do instead: paired with a cloud → call `publish({ id })` and send its `/p/<token>/n/<id>` URL; not paired → there is no external link. `response_hint` no longer contains a `MEDIA:` line with `127.0.0.1`. Live notes: `stream_url` is `null` in the same case (`local_stream_url` unchanged).
+- **MCP `replace`**: `new_public_url` is `null` without `viewer_public_url`, plus `share_hint` for the new id.
+- **MCP `version`**: `public_url` is `null` without `viewer_public_url`.
+- **MCP `attach_asset`**: `url` is the relative `/t/<thread>/asset/<file>` path without `viewer_public_url` (was: absolute `127.0.0.1` URL) — the form `body_html` should use anyway.
+- **CLI `folio new --json`** now also returns `public_url` (same rule) and `share_hint`; the text output prints the hint under the local URL.
+- `local_url` / `new_local_url` / `local_stream_url` stay as before (back-compat). With `viewer_public_url` set, nothing changes.
+- New `viewerShareableBaseUrl(cfg)` (config) returns the configured public base or `null`; `viewerPublicBaseUrl` keeps its local fallback for the viewer's startup banner only. `shareHint(id)` (sync) builds the hint from the pairing state.
+- Skill (step 7 of SKILL.md, reference/assets.md), README and docs/mcp-setup.md: a link for a human is never `127.0.0.1` / `localhost` — `publish` first.
+
 ## v0.40.1 — 2026-05-30
 
 **Fixed — sidebar collapse fallout on smaller screens.** v0.40.0 shrank the sidebar's *width* to 40px on collapse, which made content wrap inside the strip and surfaced a scrollbar; on narrower screens the sidebar also jumped to full width and pushed the note below it. This patch makes the sidebar behave like a real drawer at every width — sliding off to the left on collapse, with no wrapping, no scrollbar in the strip, and no layout jump.

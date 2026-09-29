@@ -78,10 +78,16 @@ If you can already tell the answer will need ≥2 of {multi-section headers, tab
 
 7. Respond to the user:
 
-      MEDIA:<public_url>
+      MEDIA:<link>        ← public_url, or the publish url (see below)
       <3-5 line TL;DR — essence, not the whole note>
       <Tags: tag1, tag2>   ← optional, when non-obvious
 ```
+
+> **Link for a human: never `127.0.0.1` / `localhost`.** `local_url` opens only on the machine running Folio — a user on a phone, another LAN or Telegram gets a dead link. `public_url` is set only when `viewer_public_url` is configured; otherwise it is `null` and the response carries `share_hint`:
+> - **paired with a cloud** → call `publish({ id })` first (for a living doc: `scope_type: "thread"`, `expires_in_days: 0`) and send the `url` from its response (`…/p/<token>/n/<id>`). Don't send the cloud's plain `/n/<uuid>` either — it needs a paired browser.
+> - **not paired** → there is no external link; say the note is saved in Folio (title/id) and give the TL;DR. Use `local_url` only if the user is reading on that same machine.
+>
+> Same rule for `replace` (`new_public_url`), live notes (`stream_url`) and `attach_asset` (`url` is the relative `/t/<thread>/asset/<file>` path when no public base is set).
 
 > **Large body (transcript, long doc, pasted log)?** Don't cram it into the `body_html` string — a big inline argument can be silently truncated by the agent runtime before it reaches Folio. Instead write the HTML to a file and pass **`body_path`** (absolute path) to `create` / `replace`; Folio reads it server-side and sanitizes it identically. Provide exactly one of `body_html` / `body_path`.
 
@@ -244,7 +250,7 @@ create({ type: "research", title: …, thread_id: "onboarding",
         tags: ["project:repcoach-fit", "research", "onboarding"], … })
 ```
 
-Response: `MEDIA:<url>` + *"see all project threads at `/p/<slug>`"*.
+Response: `MEDIA:<url>` (link rules from step 7) + *"see all project threads at `/p/<slug>`"*.
 
 ### Slot tag — `slot:<name>` marks canonical docs (v0.24+)
 

@@ -74,11 +74,13 @@ Most MCP-capable editors accept the same shape: command `folio-mcp`, no args, op
 After `create`, the tool returns a `response_hint` field suggesting the agent reply to the user with:
 
 ```
-MEDIA:http://127.0.0.1:4810/n/<id>
+MEDIA:<public_url>
 <3-5 line TL;DR>
 ```
 
-The user clicks the link, the local viewer renders the note. This is the core loop.
+The user clicks the link, the viewer renders the note. This is the core loop.
+
+`public_url` exists only when `viewer_public_url` is configured (see README → Public URL). Otherwise it is `null` and the response has a `share_hint`: with cloud sync paired, call `publish({ id })` and send the returned `/p/<token>/n/<id>` URL; without a cloud there is no external link. `local_url` (`http://127.0.0.1:4810/n/<id>`) opens only on the machine running Folio — never send it to someone on another device.
 
 ---
 
@@ -88,7 +90,7 @@ The user clicks the link, the local viewer renders the note. This is the core lo
 2. **Pre-create:** `suggest_thread({ title })` — if a matching thread exists, use its `thread_id`; otherwise use the proposed slug.
 3. **Optional:** `list_themes` if uncertain which theme fits the content.
 4. **Create:** `create` with type + title + body_html + thread_id (+ theme if non-default).
-5. **Reply** with `MEDIA:<local_url>` + short TL;DR.
+5. **Reply** with `MEDIA:<public_url>` (or the `publish` URL when `public_url` is null) + short TL;DR.
 6. **Iterate:** when the user asks for another angle, call `create` again with the same `thread_id` (Folio is append-only; the previous version stays).
 
 ---

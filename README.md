@@ -280,6 +280,8 @@ Folio binds to `127.0.0.1:4810` by default. When you reverse-proxy the viewer to
 
 Effect: `folio.create` returns `public_url` + a `response_hint` (the `MEDIA:` line) that uses it; `local_url` stays for in-process tooling. Notes' internal links are relative (`/n/<id>`), so existing notes render unchanged behind either base — no migration needed.
 
+Without `viewer_public_url`, `public_url` / `new_public_url` / `stream_url` are `null` (never the `127.0.0.1` address, which is dead for anyone on another device) and the response carries a `share_hint`: with cloud sync paired, call `publish` and send its `/p/<token>/…` URL; unpaired, there is no external link.
+
 ### Attaching assets to notes
 
 `folio.attach_asset` lets an agent (or bot) drop an image, PDF, or video into a thread and reference it from `body_html`. Files live next to the thread's `*.html` notes under `threads/<thread_id>/assets/`, so a single `tar` of `~/Folio/` covers them automatically.
