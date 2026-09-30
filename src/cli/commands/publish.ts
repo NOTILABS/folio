@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { c, out, err, json as jsonOut } from "../io";
 import { loadSyncState } from "../../core/sync";
 import { getNoteMeta } from "../../core/storage";
+import { createShareSynced } from "../../core/publish";
 
 export interface PublishOpts {
   id?: string;
@@ -94,21 +95,22 @@ export async function publishCmd(opts: PublishOpts): Promise<number> {
     // response says so via email_skipped="no-mailer" and we surface that.
     body.recipient_email = plain;
   }
-  const res = await fetch(`${state.remote}/v1/share`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${state.device_token}`,
-      "content-type": "application/json",
+  // sc-7749: a note created a moment ago may not be in the cloud yet —
+  // sync it and retry (bounded) instead of failing with "note not found".
+  const result = await createShareSynced(state, body, {
+    onWait: (reason, attempt) => {
+      if (attempt === 1) {
+        err(c.dim(reason === "not_synced"
+          ? "  note not in the cloud yet — syncing and retrying…\n"
+          : "  cloud not responding — retrying…\n"));
+      }
     },
-    body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = await res.text(); } catch {}
-    err(c.err(`✗ publish failed: HTTP ${res.status} ${detail.slice(0, 200)}\n`));
+  if (!result.ok) {
+    err(c.err(`✗ ${result.message}\n`));
     return 5;
   }
-  const respBody = (await res.json()) as {
+  const respBody = result.body as {
     token: string;
     url: string;
     expires_at: string | null;
