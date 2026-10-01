@@ -2,6 +2,16 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.43.1 — 2026-10-01
+
+**Fixed — `publish` right after `create` no longer fails with `HTTP 400 note not found` (sc-7749, #106).** Since v0.43.0 an agent is told to call `publish` after `create`; called immediately, the note was not in the cloud yet and the call failed, so the agent concluded sharing was broken and fell back to `127.0.0.1`.
+
+### Fixed
+
+- **MCP `publish` and CLI `folio publish`** (new `src/core/publish.ts`): on `note not found` / `thread not found or empty` they force a sync (same `.sync.lock` as the daemon; a held lock means the daemon is pushing — wait) and retry, 30 s total.
+- Cloud not responding or 5xx → retries up to the limit, then `cloud … is not responding (…). Try again in a moment.`; note still not in the cloud after 30 s → `… is not in the cloud yet — sync still in progress after 30s. Try again in a moment…`. Any other cloud error is returned at once, without sync or retries.
+- Skill (SKILL.md): `publish` right after `create` is fine; "try again in a moment" does not mean sharing is unavailable — no fallback to `local_url`.
+
 ## v0.43.0 — 2026-09-29
 
 **Changed — no more `127.0.0.1` posing as a shareable link (sc-6716).** Without `viewer_public_url`, `create` returned `public_url` = `local_url` = `http://127.0.0.1:4810/n/<id>` and a `response_hint` telling the agent to send it as `MEDIA:` — even with cloud sync paired. Relayed to a phone or another LAN, that link is dead. Now the local address is never presented as public.
