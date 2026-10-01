@@ -85,6 +85,7 @@ If you can already tell the answer will need ≥2 of {multi-section headers, tab
 
 > **Link for a human: never `127.0.0.1` / `localhost`.** `local_url` opens only on the machine running Folio — a user on a phone, another LAN or Telegram gets a dead link. `public_url` is set only when `viewer_public_url` is configured; otherwise it is `null` and the response carries `share_hint`:
 > - **paired with a cloud** → call `publish({ id })` first (for a living doc: `scope_type: "thread"`, `expires_in_days: 0`) and send the `url` from its response (`…/p/<token>/n/<id>`). Don't send the cloud's plain `/n/<uuid>` either — it needs a paired browser.
+>   Calling `publish` right after `create` is fine: a note not yet synced gets pushed first (bounded wait, ~30 s). If `publish` errors with "try again in a moment", the cloud is slow or unreachable — retry later; it does **not** mean sharing is unavailable, so don't fall back to `local_url`.
 > - **not paired** → there is no external link; say the note is saved in Folio (title/id) and give the TL;DR. Use `local_url` only if the user is reading on that same machine.
 >
 > Same rule for `replace` (`new_public_url`), live notes (`stream_url`) and `attach_asset` (`url` is the relative `/t/<thread>/asset/<file>` path when no public base is set).

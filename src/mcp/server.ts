@@ -399,7 +399,7 @@ const tools: Tool[] = [
   },
   {
     name: "publish",
-    description: "Create a capability-URL share for a note or thread. The returned URL grants read-only access to the resource without requiring the recipient to pair a device — anyone with the link can view. Requires the local Folio to be paired with a cloud relay (folio sync pair). Default expiry: 7 days. Set expires_in_days: 0 for no expiry. Optional max_views caps total page loads. Revoke via folio shares revoke <token>. Use this after create() when the user wants to share the rendered note with someone external (Slack, email, Telegram). For a hub/index note that links to other notes (v0.32+), pass include_linked:true to grant access to the whole linked set — otherwise those links 403 for the recipient (note-scope only covers the one note). Response includes note_count (root + linked) for set shares.",
+    description: "Create a capability-URL share for a note or thread. The returned URL grants read-only access to the resource without requiring the recipient to pair a device — anyone with the link can view. Requires the local Folio to be paired with a cloud relay (folio sync pair). Default expiry: 7 days. Set expires_in_days: 0 for no expiry. Optional max_views caps total page loads. Revoke via folio shares revoke <token>. Safe to call right after create(): if the note hasn't reached the cloud yet, publish syncs it first and waits (bounded, ~30 s) — an error saying \"try again in a moment\" means the cloud is slow/unreachable, not that sharing is unavailable. Use this after create() when the user wants to share the rendered note with someone external (Slack, email, Telegram). For a hub/index note that links to other notes (v0.32+), pass include_linked:true to grant access to the whole linked set — otherwise those links 403 for the recipient (note-scope only covers the one note). Response includes note_count (root + linked) for set shares.",
     inputSchema: {
       type: "object",
       required: ["id"],
@@ -1070,20 +1070,13 @@ export async function buildServer(): Promise<Server> {
               typeof args.expires_in_days === "number" ? args.expires_in_days : 7,
           };
           if (typeof args.max_views === "number") body.max_views = args.max_views;
-          const res = await fetch(`${state.remote}/v1/share`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${state.device_token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify(body),
-          });
-          if (!res.ok) {
-            let detail = "";
-            try { detail = await res.text(); } catch {}
-            return errContent(`publish failed: HTTP ${res.status} ${detail.slice(0, 200)}`);
-          }
-          const out = (await res.json()) as {
+          // sc-7749: publish right after create used to 400 "note not found"
+          // until the next sync tick. createShareSynced forces the sync and
+          // retries (bounded); a silent cloud → "try again in a moment".
+          const { createShareSynced } = await import("../core/publish");
+          const result = await createShareSynced(state, body);
+          if (!result.ok) return errContent(result.message);
+          const out = result.body as {
             token: string;
             url: string;
             scope_type: string;
