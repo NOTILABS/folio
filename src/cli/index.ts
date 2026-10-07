@@ -65,7 +65,7 @@ function help(): number {
   out("");
   out(c.bold("Commands:"));
   out(`  ${c.cyan("init")}              Initialize ~/Folio (create dirs, config, db)`);
-  out(`  ${c.cyan("new")}               Create a new note (--title, --html, --type, --thread, --theme, --live, --inline)`);
+  out(`  ${c.cyan("new")}               Create a new note (--title, --html, --type, --thread, --theme, --live, --inline, --session-key)`);
   out(`  ${c.cyan("list")}              List recent notes (--type, --thread, --final, --limit, --json)`);
   out(`  ${c.cyan("search <query>")}    Full-text search (--type, --limit, --json)`);
   out(`  ${c.cyan("append <id>")}       Append entry to a live note (--content @file, --tags, --refs, --importance, --source-ref, --occurred-at)`);
@@ -137,6 +137,7 @@ export async function main(argv = process.argv): Promise<number> {
           isFinal: flagBool(flags.final),
           live: flagBool(flags.live),
           inline: flagBool(flags.inline),
+          sessionKey: flagStr(flags["session-key"]),
           jsonOut: flagBool(flags.json),
         });
       }

@@ -17,6 +17,8 @@ interface NewOpts {
   isFinal?: boolean;
   live?: boolean;
   inline?: boolean;
+  /** sc-15149: agent chat session the note belongs to. */
+  sessionKey?: string;
   jsonOut?: boolean;
 }
 
@@ -77,6 +79,7 @@ export async function newNote(opts: NewOpts): Promise<number> {
     is_final: opts.isFinal,
     live: opts.live,
     inline: opts.inline,
+    session_key: opts.sessionKey,
   };
 
   const note = await createNote(input);

@@ -36,7 +36,30 @@ function uniqueSlug(slug: string, dir: string): string {
   return candidate;
 }
 
+/** sc-15149: upper bound for a session key. OpenClaw keys are ~100 chars
+ *  (`agent:<id>:<channel>:<…>`); the cap only stops garbage, not real keys. */
+export const SESSION_KEY_MAX = 512;
+
+/**
+ * sc-15149: canonical form of an optional session key. Trimmed; empty or
+ * missing → null. Rejects (throws) instead of truncating: a cut key would
+ * silently file the note under a session that does not exist, and the
+ * chat would never find it.
+ */
+export function normalizeSessionKey(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") throw new Error("session_key must be a string");
+  const key = raw.trim();
+  if (!key) return null;
+  if (key.length > SESSION_KEY_MAX) throw new Error(`session_key longer than ${SESSION_KEY_MAX} chars`);
+  if (/[\u0000-\u001f\u007f]/.test(key)) throw new Error("session_key contains control characters");
+  return key;
+}
+
 export async function createNote(input: CreateNoteInput): Promise<NoteMeta> {
+  // Validate before touching the filesystem — a bad key must not leave an
+  // orphan .html behind.
+  const session_key = normalizeSessionKey(input.session_key);
   const cfg = await loadConfig();
   const theme = input.theme ?? cfg.theme;
   const theme_profile: RenderProfile = input.theme_profile ?? "hosted";
@@ -117,9 +140,9 @@ export async function createNote(input: CreateNoteInput): Promise<NoteMeta> {
   const d = db();
   d.transaction(() => {
     d.run(
-      `INSERT INTO notes (id, slug, path, title, type, theme, theme_profile, thread_id, is_final, created, updated, expires_at, word_count, summary, status, live, last_entry_at, origin_device_id, owner_device_id, inline_render)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?)`,
-      [id, slug, relPath, input.title, input.type, theme, theme_profile, thread_id, is_final ? 1 : 0, created, created, expires_at, stats.word_count, stats.summary, live ? 1 : 0, origin_device_id, owner_device_id, inline_render ? 1 : 0]
+      `INSERT INTO notes (id, slug, path, title, type, theme, theme_profile, thread_id, is_final, created, updated, expires_at, word_count, summary, status, live, last_entry_at, origin_device_id, owner_device_id, inline_render, session_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?)`,
+      [id, slug, relPath, input.title, input.type, theme, theme_profile, thread_id, is_final ? 1 : 0, created, created, expires_at, stats.word_count, stats.summary, live ? 1 : 0, origin_device_id, owner_device_id, inline_render ? 1 : 0, session_key]
     );
     for (const tag of input.tags ?? []) {
       d.run("INSERT OR IGNORE INTO tags (note_id, tag) VALUES (?, ?)", [id, tag]);
@@ -179,6 +202,7 @@ export async function createNote(input: CreateNoteInput): Promise<NoteMeta> {
     superseded_by: null,
     is_pinned: false,
     pinned_at: null,
+    session_key,
   };
 }
 
@@ -228,6 +252,9 @@ export interface ListOptions {
    *  views) want only the head version. Set true for an "all versions" view
    *  or for cloud sync (which must mirror both heads and superseded rows). */
   include_superseded?: boolean;
+  /** sc-15149: only notes created in this agent chat session. Exact match
+   *  on the normalized key; notes without a session never match. */
+  session_key?: string;
 }
 
 export function listNotes(opts: ListOptions = {}): NoteMeta[] {
@@ -246,6 +273,13 @@ export function listNotes(opts: ListOptions = {}): NoteMeta[] {
   if (opts.thread_id) {
     where.push("notes.thread_id = ?");
     params.push(opts.thread_id);
+  }
+  if (opts.session_key !== undefined) {
+    // Normalized like on create so " key " finds "key"; an empty key would
+    // mean "no filter" and dump the whole Folio — match nothing instead.
+    const key = normalizeSessionKey(opts.session_key);
+    where.push(key === null ? "0" : "notes.session_key = ?");
+    if (key !== null) params.push(key);
   }
   if (opts.is_final !== undefined) {
     where.push("notes.is_final = ?");
@@ -627,6 +661,8 @@ export async function replaceNote(input: ReplaceNoteInput): Promise<ReplaceNoteR
     theme_profile: old.theme_profile,
     thread_id: old.thread_id,
     tags: input.tags ?? old.tags,
+    // sc-15149: a revision belongs to the same chat as the draft it replaces.
+    session_key: old.session_key ?? undefined,
   });
 
   // Mark old as superseded. Atomic — old.html stays on disk untouched
@@ -1722,6 +1758,7 @@ function rowToMeta(row: Record<string, any>): NoteMeta {
     superseded_by: row.superseded_by ?? null,
     is_pinned: row.is_pinned === 1,
     pinned_at: row.pinned_at ?? null,
+    session_key: row.session_key ?? null,
   };
 }
 

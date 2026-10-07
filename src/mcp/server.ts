@@ -133,6 +133,7 @@ const tools: Tool[] = [
         is_final: { type: "boolean", description: "Mark as final (no auto-cleanup). User typically does this from viewer; agent only when explicitly asked." },
         live: { type: "boolean", description: "Create as a live note (append-only journal/log/feed). body_html may be empty/minimal chrome. Use append_entry to add entries over time; viewer streams them via SSE. Finalize compiles the feed back into body_html." },
         inline: { type: "boolean", description: "Live notes only (v0.17+). When true, entries render INSIDE body_html (not in a side panel). Include a <section data-folio-live-feed></section> placeholder in body_html where entries should land; Folio auto-injects one at the end if you omit it. Use for journal/feed shapes where the document IS the feed — entries appear inline on every viewer hit + arrive in real time via postMessage. Ignored when live=false." },
+        session_key: { type: "string", description: "Key of the chat session you are answering in (your runtime's session key, e.g. `agent:main:kokpit:…`). Optional but pass it whenever you know it: chat clients (Kokpit's \"Files & artifacts\" tab, library) list a session's notes by this key, so the note shows up there even if you never paste its link. Never invent one — omit when unknown." },
       },
     },
   },
@@ -169,6 +170,7 @@ const tools: Tool[] = [
         type: { type: "string", enum: ALLOWED_TYPES },
         thread_id: { type: "string" },
         is_final: { type: "boolean" },
+        session_key: { type: "string", description: "Only notes created with this session_key (sc-15149)." },
         limit: { type: "number", description: "Default 50, max 200." },
       },
     },
@@ -493,6 +495,7 @@ export async function buildServer(): Promise<Server> {
             is_final: typeof args.is_final === "boolean" ? args.is_final : undefined,
             live,
             inline,
+            session_key: typeof args.session_key === "string" ? args.session_key : undefined,
           });
           const cfg = await loadConfig();
           const localUrl = `${viewerLocalBaseUrl(cfg)}/n/${note.id}`;
@@ -514,6 +517,9 @@ export async function buildServer(): Promise<Server> {
             theme_profile: note.theme_profile,
             expires_at: note.expires_at,
             live: note.live,
+            // sc-15149: echo so the agent sees whether the note is filed
+            // under its chat session (null = no key passed).
+            session_key: note.session_key,
             // Hint to agent: include in MEDIA: response convention. Built only
             // from public_url so relays (Telegram, email, Slack) never paste
             // localhost URLs; without one it points at publish instead.
@@ -565,6 +571,7 @@ export async function buildServer(): Promise<Server> {
             type: args.type as NoteType | undefined,
             thread_id: args.thread_id ? String(args.thread_id) : undefined,
             is_final: typeof args.is_final === "boolean" ? args.is_final : undefined,
+            session_key: typeof args.session_key === "string" ? args.session_key : undefined,
             limit: Math.min(typeof args.limit === "number" ? args.limit : 50, 200),
           });
           return jsonContent(rows);

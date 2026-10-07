@@ -135,7 +135,7 @@ test("v0.8.0 db schema_version bumped to head after migration", async () => {
   const { db } = await import("../src/core/db");
   const d = db();
   const row = d.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'").get();
-  expect(row?.value).toBe("6");
+  expect(row?.value).toBe("7");
 });
 
 // ───── Greenfield install path ───────────────────────────────────────────
@@ -155,7 +155,7 @@ test("greenfield install: db file created with head schema immediately", async (
     .map((r) => r.name);
   expect(indexes).toContain("notes_by_live");
   const row = d.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'").get();
-  expect(row?.value).toBe("6");
+  expect(row?.value).toBe("7");
 });
 
 // ───── Idempotency ───────────────────────────────────────────────────────
@@ -178,7 +178,7 @@ test("close + reopen on already-migrated db is a no-op upgrade", async () => {
   expect(() => mod.db()).not.toThrow();
   const d = mod.db();
   const row = d.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'").get();
-  expect(row?.value).toBe("6");
+  expect(row?.value).toBe("7");
 });
 
 // ───── v0.9.x → v0.10.x (W2 origin_device_id/owner_device_id) ────────────
