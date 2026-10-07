@@ -118,6 +118,10 @@ export interface Note {
    *  `is_pinned=false`. Used to order multiple pinned notes — freshly
    *  pinned floats above long-pinned. Cleared on unpin. */
   pinned_at: string | null;
+  /** sc-15149: key of the agent chat session the note was created in
+   *  (e.g. a Kokpit topic), or null when unknown — notes created before
+   *  the v6→v7 migration and notes whose creator passed none. */
+  session_key: string | null;
 }
 
 export interface NoteMeta {
@@ -144,6 +148,7 @@ export interface NoteMeta {
   superseded_by: string | null;
   is_pinned: boolean;
   pinned_at: string | null;
+  session_key: string | null;
 }
 
 export interface CreateNoteInput {
@@ -164,6 +169,10 @@ export interface CreateNoteInput {
    *  <section data-folio-live-feed></section> placeholder that entries
    *  splice into; if omitted, Folio auto-injects one at the end of body. */
   inline?: boolean;
+  /** sc-15149: key of the agent chat session creating the note. Trimmed;
+   *  empty = none. Longer than 512 chars or containing control characters
+   *  → createNote throws (see normalizeSessionKey). */
+  session_key?: string;
 }
 
 /**

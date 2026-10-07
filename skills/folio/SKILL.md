@@ -74,7 +74,12 @@ If you can already tell the answer will need ≥2 of {multi-section headers, tab
 
 5. Generate body_html per STYLEBOOK.md for the chosen theme.
 
-6. create({ type, title, body_html, thread_id, theme?, tags?, live? })
+6. create({ type, title, body_html, thread_id, theme?, tags?, live?, session_key? })
+
+   session_key = your current chat session key, when your runtime shows one
+   (OpenClaw: `session=…` in the Runtime line). Chat clients list a session's
+   notes by it, so the note appears in the chat's files tab even without its
+   link in the conversation. Unknown → omit it; never invent one.
 
 7. Respond to the user:
 

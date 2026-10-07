@@ -923,7 +923,20 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
         if (req.method === "GET" && path === "/api/list") {
           const type = url.searchParams.get("type") as NoteType | null;
           const thread = url.searchParams.get("thread");
-          return jsonResp(listNotes({ type: type ?? undefined, thread_id: thread ?? undefined, limit: 200 }));
+          // sc-15149: ?session_key=<key> → notes created in that agent chat
+          // session (Kokpit topic tab + library). Present-but-empty matches
+          // nothing rather than everything.
+          const sessionKey = url.searchParams.get("session_key");
+          try {
+            return jsonResp(listNotes({
+              type: type ?? undefined,
+              thread_id: thread ?? undefined,
+              session_key: sessionKey ?? undefined,
+              limit: 200,
+            }));
+          } catch (e: any) {
+            return jsonResp({ error: e?.message ?? String(e) }, 400);
+          }
         }
 
         // GET /api/search

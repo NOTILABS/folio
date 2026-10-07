@@ -165,6 +165,26 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    from: "6",
+    to: "7",
+    description:
+      "Add session_key column to notes (sc-15149). Optional key of the agent " +
+      "chat session the note was created in (e.g. a Kokpit topic). Lets a " +
+      "chat client list a session's notes even when the note link was never " +
+      "pasted into the conversation. NULL = unknown session — every note " +
+      "created before this migration, and every note whose creator did not " +
+      "pass one. Backfill is a no-op: there is no source of truth for the " +
+      "session of an old note, and guessing would attach notes to the wrong " +
+      "chat.",
+    up: (db) => {
+      if (!hasColumn(db, "notes", "session_key")) {
+        db.exec("ALTER TABLE notes ADD COLUMN session_key TEXT");
+      }
+      // notes_by_session index lives in PHASE2_SCHEMA (db.ts) — runs after
+      // this ALTER on upgrades, from CREATE TABLE on greenfield.
+    },
+  },
 ];
 
 /**

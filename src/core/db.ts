@@ -73,7 +73,11 @@ CREATE TABLE IF NOT EXISTS notes (
   -- (entry-level tag on live notes). Migration v5→v6 adds these to
   -- pre-existing dbs.
   is_pinned INTEGER NOT NULL DEFAULT 0,
-  pinned_at TEXT
+  pinned_at TEXT,
+  -- sc-15149: key of the agent chat session the note was created in
+  -- (optional, NULL for older notes). Chat clients list a session's notes
+  -- by it. Migration v6→v7 adds the column to pre-existing dbs.
+  session_key TEXT
 );
 CREATE INDEX IF NOT EXISTS notes_by_type ON notes(type, created DESC);
 CREATE INDEX IF NOT EXISTS notes_by_thread ON notes(thread_id, created DESC);
@@ -93,6 +97,10 @@ CREATE INDEX IF NOT EXISTS notes_by_superseded ON notes(superseded_by) WHERE sup
 -- pinned, so the index stays tiny and the "float pinned to top" sort is
 -- O(pinned) instead of a full table scan + ORDER BY.
 CREATE INDEX IF NOT EXISTS notes_by_pinned ON notes(pinned_at DESC) WHERE is_pinned = 1;
+-- sc-15149: per-session listing (GET /api/list?session_key=…). Partial —
+-- notes without a session never hit this lookup. Column comes from the
+-- v6→v7 migration on upgrades, from CREATE TABLE on greenfield.
+CREATE INDEX IF NOT EXISTS notes_by_session ON notes(session_key, created DESC) WHERE session_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tags (
   note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
