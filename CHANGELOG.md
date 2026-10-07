@@ -2,6 +2,19 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## Unreleased
+
+**Added — `session_key`: which chat a note was created in (sc-15149).** A chat client (NotiBox Kokpit) listed a topic's Folio notes only when their link had been pasted into the conversation; a note the agent created without pasting the URL was invisible there. Now the creator can pass the key of its chat session and the client asks Folio for that session's notes.
+
+### Added
+
+- **Schema v7**: nullable `notes.session_key` + partial index `notes_by_session`. Migration 6→7 only adds the column — older notes stay `NULL` (no backfill: there is no source of truth for an old note's session) and behave exactly as before.
+- **MCP `create`**: optional `session_key` (trimmed; > 512 chars or control characters → error, nothing written). Echoed in the response.
+- **MCP `list`** and **`GET /api/list`**: `session_key` filter. Present-but-empty matches nothing (never "no filter"); invalid → `400` on the HTTP route.
+- **`replace`**: the new revision inherits the old one's `session_key`.
+- **CLI `folio new --session-key <key>`**.
+- Not synced to the cloud: a session key only means something to the box that runs the agent.
+
 ## v0.43.0 — 2026-09-29
 
 **Changed — no more `127.0.0.1` posing as a shareable link (sc-6716).** Without `viewer_public_url`, `create` returned `public_url` = `local_url` = `http://127.0.0.1:4810/n/<id>` and a `response_hint` telling the agent to send it as `MEDIA:` — even with cloud sync paired. Relayed to a phone or another LAN, that link is dead. Now the local address is never presented as public.
