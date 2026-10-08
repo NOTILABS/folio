@@ -2,7 +2,15 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
-## v0.44.0 — 2026-10-08
+## v0.44.1 — 2026-10-08
+
+**Release of v0.44.0 (never published).** The `v0.44.0` tag exists, but its Release build failed on darwin-arm64 in the test step, so no binaries were published. This release carries the same content as v0.44.0 below (schema v7 with `session_key`, sc-15149; `publish` right after `create`, sc-7749).
+
+### Fixed
+
+- **Test suite on macOS**: the v6→v7 migration test rolled the head schema back to v6 with `ALTER TABLE notes DROP COLUMN session_key`; the system SQLite on macOS fails to reparse the rewritten `CREATE TABLE` (`error in table notes after drop column: incomplete input`). The test now rebuilds the table instead. The migration itself (`ADD COLUMN`) is unchanged and was not affected.
+
+## v0.44.0 — 2026-10-08 (tagged, not released)
 
 **Added — `session_key`: which chat a note was created in (sc-15149).** A chat client (NotiBox Kokpit) listed a topic's Folio notes only when their link had been pasted into the conversation; a note the agent created without pasting the URL was invisible there. Now the creator can pass the key of its chat session and the client asks Folio for that session's notes.
 

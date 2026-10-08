@@ -59,6 +59,40 @@ async function makeNote(title: string, session_key?: string, thread_id = "sk") {
 
 // ─── migration ──────────────────────────────────────────────────────────
 
+/**
+ * Roll the head `notes` table back to the v6 shape without
+ * `ALTER TABLE … DROP COLUMN`. DROP COLUMN rewrites the stored CREATE
+ * TABLE text, and the system SQLite on macOS (bun:sqlite links it on
+ * darwin) fails to reparse it when the dropped last column is preceded by
+ * `--` comments: "error in table notes after drop column: incomplete
+ * input" (Release run 37768681318, macos-14). Instead: the classic table
+ * rebuild — head CREATE TABLE minus the session_key block, copy rows, swap.
+ */
+function rebuildNotesWithoutSessionKey(d: Database): void {
+  const row = d
+    .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='notes'")
+    .get();
+  const headSql = row!.sql;
+  // `,` after pinned_at, the sc-15149 comment lines, then the column itself.
+  const v6Sql = headSql.replace(/,\s*(?:--[^\n]*\n\s*)*session_key TEXT\s*\)\s*$/, "\n)");
+  expect(v6Sql).not.toBe(headSql);
+  expect(v6Sql).not.toContain("session_key");
+  const cols = d
+    .query<{ name: string }, []>("PRAGMA table_info(notes)")
+    .all()
+    .map((r) => r.name)
+    .filter((n) => n !== "session_key")
+    .join(", ");
+  d.exec("PRAGMA foreign_keys = OFF");
+  d.exec("BEGIN");
+  d.exec(v6Sql.replace(/^CREATE TABLE\s+(?:"notes"|notes)/, "CREATE TABLE notes_v6"));
+  d.exec(`INSERT INTO notes_v6 (${cols}) SELECT ${cols} FROM notes`);
+  d.exec("DROP TABLE notes"); // drops notes_by_* indexes too; db() recreates them
+  d.exec("ALTER TABLE notes_v6 RENAME TO notes");
+  d.exec("COMMIT");
+  d.exec("PRAGMA foreign_keys = ON");
+}
+
 test("v6 db: migration adds session_key, old notes stay listable with NULL", async () => {
   // Create a head-shaped db, then roll it back to the v6 shape (no
   // session_key column, schema_version='6') with one note in it — what a
@@ -67,8 +101,7 @@ test("v6 db: migration adds session_key, old notes stay listable with NULL", asy
   const old = await makeNote("Sprzed migracji");
   closeDb();
   const d = new Database(join(tmpDir, "index.sqlite"));
-  d.exec("DROP INDEX IF EXISTS notes_by_session");
-  d.exec("ALTER TABLE notes DROP COLUMN session_key");
+  rebuildNotesWithoutSessionKey(d);
   d.run("UPDATE meta SET value = '6' WHERE key = 'schema_version'");
   const colsBefore = d.query<{ name: string }, []>("PRAGMA table_info(notes)").all().map((r) => r.name);
   expect(colsBefore).not.toContain("session_key");
