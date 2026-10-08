@@ -2,9 +2,11 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
-## Unreleased
+## v0.44.0 — 2026-10-08
 
 **Added — `session_key`: which chat a note was created in (sc-15149).** A chat client (NotiBox Kokpit) listed a topic's Folio notes only when their link had been pasted into the conversation; a note the agent created without pasting the URL was invisible there. Now the creator can pass the key of its chat session and the client asks Folio for that session's notes.
+
+**Fixed — `publish` right after `create` no longer fails with `HTTP 400 note not found` (sc-7749, #106).** Since v0.43.0 an agent is told to call `publish` after `create`; called immediately, the note was not in the cloud yet and the call failed, so the agent concluded sharing was broken and fell back to `127.0.0.1`. (Never released as v0.43.1 — the fix ships here.)
 
 ### Added
 
@@ -14,6 +16,12 @@ All notable changes per release. The latest version is documented in [README.md]
 - **`replace`**: the new revision inherits the old one's `session_key`.
 - **CLI `folio new --session-key <key>`**.
 - Not synced to the cloud: a session key only means something to the box that runs the agent.
+
+### Fixed
+
+- **MCP `publish` and CLI `folio publish`** (new `src/core/publish.ts`): on `note not found` / `thread not found or empty` they force a sync (same `.sync.lock` as the daemon; a held lock means the daemon is pushing — wait) and retry, 30 s total.
+- Cloud not responding or 5xx → retries up to the limit, then `cloud … is not responding (…). Try again in a moment.`; note still not in the cloud after 30 s → `… is not in the cloud yet — sync still in progress after 30s. Try again in a moment…`. Any other cloud error is returned at once, without sync or retries.
+- Skill (SKILL.md): `publish` right after `create` is fine; "try again in a moment" does not mean sharing is unavailable — no fallback to `local_url`.
 
 ## v0.43.0 — 2026-09-29
 
