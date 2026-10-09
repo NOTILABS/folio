@@ -95,7 +95,9 @@ jobs:
         with:
           name: folio-${{ matrix.target }}
           path: folio-${{ matrix.target }}.tar.gz
-          retention-days: 14
+          # Tylko przekazanie do joba `release`; paczki zostają w wydaniu na GitHubie.
+          # Org NOTILABS ma 500 MB na artefakty łącznie (plan Free) — sc-11293.
+          retention-days: 1
 
   release:
     name: Publish release
