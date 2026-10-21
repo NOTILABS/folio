@@ -2,6 +2,14 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.44.2 — 2026-10-21
+
+**CI-only release.** No change to the binary or its behaviour versus v0.44.1; this release exists so the new Release workflow setting is exercised end to end.
+
+### Changed
+
+- **Release workflow**: per-target build artifacts (`folio-<target>.tar.gz`) are kept for 1 day instead of 14 (#112, sc-11293). They only hand the archives over to the `release` job; the published packages stay attached to the GitHub Release. The NOTILABS org has 500 MB of artifact storage in total.
+
 ## v0.44.1 — 2026-10-08
 
 **Release of v0.44.0 (never published).** The `v0.44.0` tag exists, but its Release build failed on darwin-arm64 in the test step, so no binaries were published. This release carries the same content as v0.44.0 below (schema v7 with `session_key`, sc-15149; `publish` right after `create`, sc-7749).
