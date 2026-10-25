@@ -296,6 +296,34 @@ export interface ValidationFail {
 }
 
 /**
+ * Walk a note's replace chain forward (this note → whoever superseded it →
+ * ...), including the starting uuid, up to `limit` hops, scoped to one user
+ * so a chain can never cross into another user's notes. sc-24117: lets a
+ * capability token minted for an old revision keep covering the note after
+ * `replace` mints a new head — the link format never changes, so access has
+ * to follow the chain instead of the token's scope_id staying put.
+ */
+function forwardChainUuids(startUuid: string, userId: string, db: Database, limit = 50): string[] {
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let cur: string | null = startUuid;
+  let hops = 0;
+  while (cur && !seen.has(cur) && hops < limit) {
+    seen.add(cur);
+    chain.push(cur);
+    const row = db
+      .query<{ superseded_by: string | null }, [string, string]>(
+        "SELECT superseded_by FROM notes WHERE uuid = ? AND user_id = ?"
+      )
+      .get(cur, userId);
+    if (!row) break;
+    cur = row.superseded_by;
+    hops++;
+  }
+  return chain;
+}
+
+/**
  * Validate that `share` can be used to access the requested resource.
  * Does NOT mutate view_count — caller decides when to bump (after a
  * successful render, atomically). This split keeps validation pure.
@@ -318,17 +346,35 @@ export function validateShareAccess(
   // Scope match.
   if (share.scope_type === "note") {
     if (requested.type !== "note") return { ok: false, reason: "scope-mismatch" };
-    if (requested.uuid !== share.scope_id) return { ok: false, reason: "scope-mismatch" };
+    // sc-24117: beyond the literal scope_id, also allow any uuid reachable
+    // by walking scope_id's replace chain forward (the current head, or an
+    // intermediate revision) — a `replace` must not 404 an existing share.
+    if (
+      requested.uuid !== share.scope_id &&
+      !forwardChainUuids(share.scope_id, share.user_id, db).includes(requested.uuid)
+    ) {
+      return { ok: false, reason: "scope-mismatch" };
+    }
   } else if (share.scope_type === "set") {
-    // Set-scoped: the requested note must be a member of share_notes. Threads
-    // aren't grantable through a set (it's a note bundle, not a thread).
+    // Set-scoped: the requested note must be a member of share_notes, OR
+    // reachable by walking a member's replace chain forward (sc-24117, same
+    // reasoning as the note-scope case above). Threads aren't grantable
+    // through a set (it's a note bundle, not a thread).
     if (requested.type !== "note") return { ok: false, reason: "scope-mismatch" };
     const member = db
       .query<{ note_uuid: string }, [string, string]>(
         "SELECT note_uuid FROM share_notes WHERE token = ? AND note_uuid = ?"
       )
       .get(share.token, requested.uuid);
-    if (!member) return { ok: false, reason: "scope-mismatch" };
+    if (!member) {
+      const members = db
+        .query<{ note_uuid: string }, [string]>("SELECT note_uuid FROM share_notes WHERE token = ?")
+        .all(share.token);
+      const reachable = members.some((m) =>
+        forwardChainUuids(m.note_uuid, share.user_id, db).includes(requested.uuid)
+      );
+      if (!reachable) return { ok: false, reason: "scope-mismatch" };
+    }
   } else {
     // share is thread-scoped.
     if (requested.type === "thread") {

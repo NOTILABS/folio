@@ -66,6 +66,7 @@ import {
 } from "./admin";
 import { createHash } from "node:crypto";
 import { rawNoteHeaders } from "../core/csp";
+import { DEFAULT_SHARE_EXPIRES_DAYS } from "../core/config";
 import pkg from "../../package.json" with { type: "json" };
 
 function json(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
@@ -422,13 +423,46 @@ async function handleCapabilityRoute(req: Request, path: string, method: string,
     // when caller targets a note). Same lookup is reused for rendering
     // below. Pinned to share.user_id so a leaked token from user A can
     // never address user B's notes even if the uuid happens to collide.
-    const note = cloudDb()
-      .query<
-        { uuid: string; title: string; theme: string; body_html: string; thread_id: string; summary: string | null },
-        [string, string]
-      >("SELECT uuid, title, theme, body_html, thread_id, summary FROM notes WHERE uuid = ? AND user_id = ?")
-      .get(id, share.user_id);
+    type CapabilityNoteRow = {
+      uuid: string;
+      title: string;
+      theme: string;
+      body_html: string;
+      thread_id: string;
+      summary: string | null;
+      superseded_by: string | null;
+    };
+    const noteQuery = () =>
+      cloudDb().query<CapabilityNoteRow, [string, string]>(
+        "SELECT uuid, title, theme, body_html, thread_id, summary, superseded_by FROM notes WHERE uuid = ? AND user_id = ?"
+      );
+    let note = noteQuery().get(id, share.user_id);
     if (!note) return new Response("not found", { status: 404 });
+
+    // sc-24117: `replace` mints a new head and points this note's
+    // superseded_by at it. The capability link format never changes
+    // (`/p/<token>/n/<scope_id>`), so an old link must keep resolving — to
+    // the NEW content, not a 404. We render the head IN PLACE rather than
+    // issuing a redirect: the URL the recipient has stays valid indefinitely
+    // (a redirect would still work too since fetch follows them, but
+    // render-in-place also means /p/<token>/raw/<old-uuid> hit directly —
+    // e.g. a stale cached iframe src — resolves too, with no second round-
+    // trip, and it mirrors the local (non-cloud) viewer's existing pattern
+    // for this exact situation — see render.ts `supersedeBanner`/
+    // resolveHeadOfChain, which shows the head's content in place rather
+    // than redirecting the browser). Limit 50 matches the walk in
+    // validateShareAccess.
+    if (note.superseded_by) {
+      let cur = note;
+      let hops = 0;
+      while (cur.superseded_by && hops < 50) {
+        const next = noteQuery().get(cur.superseded_by, share.user_id);
+        if (!next) break;
+        cur = next;
+        hops++;
+      }
+      note = cur;
+    }
 
     const v = validateShareAccess(share, { type: "note", uuid: note.uuid, thread_id: note.thread_id });
     if (!v.ok) return shareFailure(v.reason);
@@ -1043,7 +1077,7 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
               scope_type: body.scope_type,
               scope_id: body.scope_id,
               created_by_device: device!.id,
-              expires_in_days: body.expires_in_days ?? 7,
+              expires_in_days: body.expires_in_days ?? DEFAULT_SHARE_EXPIRES_DAYS,
               max_views: body.max_views ?? null,
               recipient_email_hash: recipientEmailHash,
               allow_pick: body.allow_pick === true,
