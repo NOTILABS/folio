@@ -102,6 +102,33 @@ test("shared: unshared note never reaches the cloud; shared note does", async ()
   expect(await cloudHasNote(secret.id)).toBe(false);
 });
 
+test("shared: viewer \"Share\" (POST /api/notes/:id/shares) pushes the unshared note's snapshot first", async () => {
+  // QA finding on PR #114: the viewer proxied straight to /v1/share, so in
+  // shared mode an unshared note was never in the cloud → 502 note not found.
+  const { createNote } = await import("../src/core/storage");
+  const { saveConfig, loadConfig } = await import("../src/core/config");
+  await saveConfig({ ...(await loadConfig()), viewer_port: 0 });
+  const note = await createNote({ type: "snippet", title: "Viewer", body_html: "<p>v</p>", thread_id: "v" });
+  const other = await createNote({ type: "snippet", title: "Other", body_html: "<p>o</p>", thread_id: "o" });
+
+  const { startServer } = await import("../src/viewer/server");
+  const viewer = (await startServer()) as any;
+  try {
+    const r = await fetch(`http://${viewer.hostname}:${viewer.port}/api/notes/${note.id}/shares`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expires_in_days: 7 }),
+    });
+    expect(r.status).toBe(200);
+    const data = (await r.json()) as { token: string };
+    expect(typeof data.token).toBe("string");
+    expect(await cloudHasNote(note.id)).toBe(true);
+    expect(await cloudHasNote(other.id)).toBe(false);
+  } finally {
+    viewer.stop(true);
+  }
+});
+
 test("shared: publishing an old note works even though the (unused) push cursor is far in the future", async () => {
   const { createNote } = await import("../src/core/storage");
   const { loadSyncState } = await import("../src/core/sync");

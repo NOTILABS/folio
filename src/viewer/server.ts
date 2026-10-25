@@ -797,6 +797,10 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
             payload.recipient_email_hash = recipientEmailHash(plain);
             payload.recipient_email = plain;
           }
+          // sc-24117: in `sync_scope: "shared"` an unshared note is not in
+          // the cloud, so push its snapshot first (no-op in `all` mode).
+          const { prePushSharedScope } = await import("../core/publish");
+          await prePushSharedScope(state, payload);
           const res = await fetch(`${state.remote}/v1/share`, {
             method: "POST",
             headers: {
