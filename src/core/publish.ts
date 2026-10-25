@@ -11,7 +11,8 @@
  * try again in a moment instead of leaking a misleading "not found".
  */
 
-import { acquireLock, releaseLock, loadSyncState, syncOnce, LockHeldError, type SyncState } from "./sync";
+import { acquireLock, releaseLock, loadSyncState, syncOnce, pushScopeSnapshot, LockHeldError, type SyncState } from "./sync";
+import { loadConfig } from "./config";
 
 export type PublishOutcome =
   | { ok: true; body: any; syncs: number; attempts: number }
@@ -85,6 +86,30 @@ export async function createShareSynced(
   const syncStep = opts.syncStep ?? defaultSyncStep;
   const deadline = Date.now() + timeoutMs;
   const scope = `${String(body.scope_type ?? "note")} ${String(body.scope_id ?? "")}`;
+
+  // sc-24117: in `sync_scope: "shared"` the normal sync tick never does a
+  // blanket push, so a brand-new share would otherwise have to wait for
+  // `createShareSynced`'s not-synced retry loop below to kick off a full
+  // `syncOnce` (which itself only pushes existing-share coverage — this
+  // share doesn't exist yet, so it wouldn't be covered). Push this scope's
+  // snapshot directly, before the first POST, so the common case needs no
+  // retry at all. Best-effort: if it throws (offline, lock held by another
+  // syncer already pushing the same thing), fall through to the POST — the
+  // not-synced retry loop is the safety net either way.
+  const scopeIdStr = typeof body.scope_id === "string" ? body.scope_id : "";
+  if (scopeIdStr) {
+    try {
+      const cfg = await loadConfig();
+      if (cfg.sync_scope === "shared") {
+        const scope_type = (body.scope_type === "thread" || body.scope_type === "set")
+          ? body.scope_type
+          : "note";
+        await pushScopeSnapshot(state, { scope_type, scope_id: scopeIdStr });
+      }
+    } catch {
+      // Swallowed — see comment above.
+    }
+  }
 
   let attempts = 0;
   let syncs = 0;
