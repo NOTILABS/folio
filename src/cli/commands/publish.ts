@@ -15,9 +15,10 @@
 
 import { createHash } from "node:crypto";
 import { c, out, err, json as jsonOut } from "../io";
-import { loadSyncState } from "../../core/sync";
+import { loadSyncState, purgeSharedAfterRevoke } from "../../core/sync";
 import { getNoteMeta } from "../../core/storage";
 import { createShareSynced } from "../../core/publish";
+import { DEFAULT_SHARE_EXPIRES_DAYS, loadConfig } from "../../core/config";
 
 export interface PublishOpts {
   id?: string;
@@ -80,7 +81,7 @@ export async function publishCmd(opts: PublishOpts): Promise<number> {
   const body: Record<string, unknown> = {
     scope_type,
     scope_id,
-    expires_in_days: opts.expiresDays ?? 7,
+    expires_in_days: opts.expiresDays ?? DEFAULT_SHARE_EXPIRES_DAYS,
     max_views: opts.maxViews ?? null,
   };
   if (opts.allowPick) body.allow_pick = true;
@@ -257,6 +258,13 @@ async function revokeShareCmd(
   const body = (await res.json()) as { revoked: string | null };
   if (body.revoked) {
     out(c.ok("✓") + ` Revoked ${c.dim(body.revoked.slice(0, 12) + "…")}`);
+    // sc-24117: in `sync_scope: "shared"` the revoked scope's snapshot
+    // should disappear from the cloud right away, not at the next sync
+    // tick. Best-effort — the tick is the safety net if this fails.
+    try {
+      const cfg = await loadConfig();
+      if (cfg.sync_scope === "shared") await purgeSharedAfterRevoke(state!);
+    } catch {}
   } else {
     out(c.dim("Nothing to revoke (token unknown or already revoked)."));
   }
