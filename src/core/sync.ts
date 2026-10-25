@@ -68,6 +68,18 @@ export interface SyncState {
    *  so the created-keyed active-notes window in pushNotes never re-sends it.
    *  Null on first run. */
   last_supersede_pushed_at?: string | null;
+  /** sc-24117: `sync_scope: "shared"` snapshot tracking — every local note
+   *  uuid currently believed to be on the cloud because it's covered by one
+   *  of this device's active shares, mapped to the `updated` value as of
+   *  that push. Unlike `last_pushed_at` (a monotonic cursor), this can't be a
+   *  cursor: a note can enter coverage long after its `created`/`updated`
+   *  (an old note gets shared), so we need per-note "have we pushed the
+   *  CURRENT version" state, not a watermark. Also doubles as the purge set:
+   *  a key no longer in computed coverage (revoked, expired, deleted
+   *  locally) gets pushed as a `delete` and dropped from this map. Optional
+   *  so pre-sc-24117 state files (and `sync_scope: "all"` users, who never
+   *  touch it) keep validating. */
+  shared_pushed?: Record<string, string>;
 }
 
 function statePath(): string {
@@ -658,18 +670,25 @@ export async function pushSupersedes(state: SyncState, selfDeviceId: string): Pr
 
 // ----- Push live entries -----
 
-export async function pushLiveEntries(state: SyncState, selfDeviceId: string): Promise<number> {
+export async function pushLiveEntries(
+  state: SyncState,
+  selfDeviceId: string,
+  allowedIds?: Set<string>
+): Promise<number> {
   // Live notes owned by this device.
   // Push entries for both live notes (v0.9+) and iteration notes (v0.18+).
   // Iteration notes reuse the JSONL substrate to store variants/picks, so
   // they need the same sync treatment even though live=0 on them.
-  const notes = db()
+  // sc-24117: `allowedIds` narrows this to a `sync_scope: "shared"` coverage
+  // set — entries for a live note outside the shared snapshot must not leak.
+  let notes = db()
     .query<{ id: string; path: string }, [string]>(
       `SELECT id, path FROM notes
         WHERE (live = 1 OR type = 'iteration') AND status = 'active'
           AND (owner_device_id IS NULL OR owner_device_id = ?)`
     )
     .all(selfDeviceId);
+  if (allowedIds) notes = notes.filter((n) => allowedIds.has(n.id));
 
   const allEntries: PushLiveEntryPayload[] = [];
   const lastByNote: Record<string, string> = { ...(state.last_live_pushed ?? {}) };
@@ -993,10 +1012,302 @@ function applyPulledLiveEntry(e: PullLiveEntry): boolean {
   return true;
 }
 
+// ----- Shared sync scope (sc-24117) -----
+//
+// `sync_scope: "shared"` turns the cloud from a full mirror into a
+// publish-only relay: only notes covered by this device's own active shares
+// ever leave the box, and the box never pulls (it is always the source of
+// truth). Device-side auth (device_token / `replace` of device_id, part B
+// of sc-24117) is NOT touched here — this is purely "what gets pushed".
+
+export interface ShareScope {
+  scope_type: "note" | "thread" | "set";
+  scope_id: string;
+}
+
+/** Walk a note's replace chain forward (this note → whoever superseded it →
+ *  ...), including the starting id, up to `capSteps` hops. Deliberately
+ *  local to sync.ts (not storage.ts's getRevisionChain/resolveHeadOfChain)
+ *  so this module doesn't need a core/storage dependency; stops at the
+ *  first missing/trashed link so a broken chain yields a shorter — never
+ *  wrong — list. */
+function forwardChainIds(startId: string, capSteps = 50): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let cur: string | null = startId;
+  let steps = 0;
+  while (cur && !seen.has(cur) && steps < capSteps) {
+    const row = db()
+      .query<{ id: string; superseded_by: string | null }, [string]>(
+        `SELECT id, superseded_by FROM notes WHERE id = ? AND status = 'active'`
+      )
+      .get(cur);
+    if (!row) break;
+    seen.add(row.id);
+    out.push(row.id);
+    cur = row.superseded_by;
+    steps++;
+  }
+  return out;
+}
+
+/** Local analog of cloud/shares.ts `computeLinkedNoteSet` — same /n/<id>
+ *  link extraction, maxDepth + cap, but reading THIS device's notes table +
+ *  HTML files instead of the cloud's body_html column (so a `sync_scope:
+ *  "shared"` device can compute what a 'set' share covers without ever
+ *  pulling). Returns uuids reachable from `rootId`, excluding the root. */
+const LOCAL_NOTE_LINK_RE = /\/n\/([0-9A-Za-z][0-9A-Za-z-]{7,})/g;
+
+function localLinkedNoteSet(rootId: string, maxDepth = 3, cap = 50): string[] {
+  const seen = new Set<string>([rootId]);
+  const out: string[] = [];
+  let frontier: string[] = [rootId];
+  for (let depth = 0; depth < maxDepth && frontier.length > 0 && out.length < cap; depth++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      const row = db()
+        .query<{ path: string }, [string]>(`SELECT path FROM notes WHERE id = ? AND status = 'active'`)
+        .get(id);
+      if (!row) continue;
+      let html = "";
+      try {
+        html = readFileSync(join(folioRoot(), row.path), "utf-8");
+      } catch {
+        continue;
+      }
+      LOCAL_NOTE_LINK_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LOCAL_NOTE_LINK_RE.exec(html)) !== null) {
+        const linkedId = m[1]!;
+        if (seen.has(linkedId)) continue;
+        seen.add(linkedId);
+        const exists = db()
+          .query<{ id: string }, [string]>(`SELECT id FROM notes WHERE id = ? AND status = 'active'`)
+          .get(linkedId);
+        if (!exists) continue; // dangling link — nothing to push
+        out.push(linkedId);
+        next.push(linkedId);
+        if (out.length >= cap) break;
+      }
+      if (out.length >= cap) break;
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/**
+ * The set of local note uuids a share scope grants cloud visibility to —
+ * the client-side "coverage" computation `sync_scope: "shared"` pushes
+ * against. Mirrors the cloud's own share semantics (computeLinkedNoteSet,
+ * validateShareAccess's forward-chain pass) but runs against THIS device's
+ * notes table:
+ *
+ *   - note:   the note + its forward replace-chain. Old `/p/<token>/n/<id>`
+ *             links must keep resolving after a `replace`, so the whole
+ *             chain needs to be on the cloud, not just the current head.
+ *   - thread: every active note (any revision) with this thread_id — a new
+ *             note in an already-shared thread is covered the moment it's
+ *             created, no separate share needed.
+ *   - set:    the root + every note reachable via /n/<id> links (same rule
+ *             as the cloud's computeLinkedNoteSet), each with its own
+ *             forward chain.
+ */
+export function computeScopeCoverage(scope: ShareScope): string[] {
+  const covered = new Set<string>();
+  if (scope.scope_type === "note") {
+    for (const id of forwardChainIds(scope.scope_id)) covered.add(id);
+  } else if (scope.scope_type === "thread") {
+    const rows = db()
+      .query<{ id: string }, [string]>(`SELECT id FROM notes WHERE thread_id = ? AND status = 'active'`)
+      .all(scope.scope_id);
+    for (const r of rows) covered.add(r.id);
+  } else {
+    // "set"
+    const members = [scope.scope_id, ...localLinkedNoteSet(scope.scope_id)];
+    for (const member of members) {
+      for (const id of forwardChainIds(member)) covered.add(id);
+    }
+  }
+  return Array.from(covered);
+}
+
+interface RemoteShareSummary {
+  token: string;
+  scope_type: "note" | "thread" | "set";
+  scope_id: string;
+  expires_at: string | null;
+}
+
+/**
+ * GET /v1/shares, filtered to this device's non-expired shares (the cloud's
+ * `listShares` also returns already-expired rows — filtering is the
+ * client's job, same as the cloud itself does at read time in
+ * `validateShareAccess`). Deliberately does NOT catch network/HTTP errors:
+ * per sc-24117, a failed shares lookup must abort the shared-scope sync
+ * rather than being treated as "zero shares", which would purge every
+ * snapshot off the cloud on a transient outage.
+ */
+export async function fetchActiveShares(state: SyncState): Promise<RemoteShareSummary[]> {
+  const resp = await http<{ shares: RemoteShareSummary[] }>(
+    "GET",
+    `${state.remote}/v1/shares`,
+    state.device_token
+  );
+  if (!resp) throw new Error("GET /v1/shares: empty response");
+  const now = Date.now();
+  return resp.shares.filter((s) => !s.expires_at || new Date(s.expires_at).getTime() > now);
+}
+
+/**
+ * Push the current snapshot of a single share scope, independent of the
+ * normal `pushNotes` cursor — so a brand-new share (or a `replace` on an
+ * already-shared note) reaches the cloud immediately instead of waiting for
+ * the next full sync tick. Shared by `createShareSynced` (publish, before
+ * `POST /v1/share`) and the `sync_scope: "shared"` branch of `syncOnce`.
+ *
+ * Idempotent against `state.shared_pushed`: only notes whose `updated`
+ * differs from the last recorded push are re-sent. Mutates `state` but does
+ * NOT call `saveSyncState` — `syncOnce` persists once at the end of its
+ * tick; `createShareSynced` skips it deliberately (the next real sync tick
+ * reconciles either way, and publish is latency-sensitive).
+ */
+export async function pushScopeSnapshot(
+  state: SyncState,
+  scope: ShareScope,
+  selfDeviceId?: string
+): Promise<{ pushed: number; assets_pushed: number; live_pushed: number }> {
+  const self = selfDeviceId ?? getOrCreateDeviceId().id;
+  const coveredIds = computeScopeCoverage(scope);
+  if (coveredIds.length === 0) return { pushed: 0, assets_pushed: 0, live_pushed: 0 };
+  state.shared_pushed = state.shared_pushed ?? {};
+
+  const placeholders = coveredIds.map(() => "?").join(",");
+  const rows = db()
+    .query<NotePushRow, any[]>(
+      `SELECT ${NOTE_PUSH_COLUMNS} FROM notes WHERE status = 'active' AND id IN (${placeholders})`
+    )
+    .all(...coveredIds);
+
+  const stale = rows.filter((r) => state.shared_pushed![r.id] !== r.updated);
+  let pushed = 0;
+  const CHUNK = 50;
+  for (let i = 0; i < stale.length; i += CHUNK) {
+    const slice = stale.slice(i, i + CHUNK);
+    const payloads = buildNotePayloads(slice);
+    const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state.device_token, {
+      notes: payloads,
+    });
+    if (!resp) throw new Error("pushScopeSnapshot: empty response");
+    for (const r of slice) state.shared_pushed![r.id] = r.updated;
+    pushed += slice.length;
+  }
+
+  // Assets referenced by the covered notes' bodies — every call, not just
+  // when something changed, same reasoning as pushNotes' backfill pass.
+  const bodies = rows
+    .map((r) => {
+      try {
+        return {
+          body_html: extractBodyHtml(readFileSync(join(folioRoot(), r.path), "utf-8")),
+          thread_id: r.thread_id,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is { body_html: string; thread_id: string } => x !== null);
+  const assetResult = await ensureAssetsOnCloud(state, bodies);
+
+  const coveredSet = new Set(coveredIds);
+  const live_pushed = await pushLiveEntries(state, self, coveredSet);
+
+  return { pushed, assets_pushed: assetResult.uploaded, live_pushed };
+}
+
+/**
+ * Remove `shared_pushed` entries whose uuid is no longer in `coveredIds` —
+ * pushes a `delete` for each (same mechanism as `pushDeletes`, creates a
+ * cloud tombstone) so a revoked/expired/locally-deleted note's snapshot
+ * disappears from the cloud instead of lingering forever.
+ */
+export async function purgeSharedCoverage(
+  state: SyncState,
+  coveredIds: Set<string>
+): Promise<{ deleted: number }> {
+  state.shared_pushed = state.shared_pushed ?? {};
+  const stale = Object.keys(state.shared_pushed).filter((id) => !coveredIds.has(id));
+  if (stale.length === 0) return { deleted: 0 };
+  await http("POST", `${state.remote}/v1/sync/push`, state.device_token, { deletes: stale });
+  for (const id of stale) delete state.shared_pushed![id];
+  return { deleted: stale.length };
+}
+
+/**
+ * Recompute this device's full share coverage and purge anything that fell
+ * out — called right after a successful revoke (CLI `folio shares revoke`,
+ * the viewer's revoke endpoint) so the cloud snapshot disappears immediately
+ * instead of waiting for the next sync tick. Callers are expected to treat
+ * this as best-effort (swallow errors): the revoke itself already succeeded
+ * against the cloud, and the next periodic `syncOnce` tick is the safety net
+ * that retries the purge if this one fails (e.g. GET /v1/shares flaking).
+ */
+export async function purgeSharedAfterRevoke(state: SyncState): Promise<{ deleted: number }> {
+  const shares = await fetchActiveShares(state);
+  const coveredUnion = new Set<string>();
+  for (const s of shares) {
+    for (const id of computeScopeCoverage(s)) coveredUnion.add(id);
+  }
+  const result = await purgeSharedCoverage(state, coveredUnion);
+  saveSyncState(state);
+  return result;
+}
+
+/**
+ * `sync_scope: "shared"` sync step: publish-only. Pushes ONLY the snapshot
+ * covered by this device's active shares (never a blanket `pushNotes`),
+ * purges whatever fell out of coverage since the last tick, and skips
+ * `pullNotes` entirely — the cloud is a one-way publish relay in this mode,
+ * never a source the box reads back from. A failed `GET /v1/shares`
+ * propagates (see `fetchActiveShares`) so the whole tick fails instead of
+ * silently purging every snapshot.
+ */
+async function syncOnceShared(state: SyncState, selfDeviceId: string): Promise<SyncStepResult> {
+  const shares = await fetchActiveShares(state);
+  let pushed = 0;
+  let assets_pushed = 0;
+  let live_pushed = 0;
+  const coveredUnion = new Set<string>();
+  for (const s of shares) {
+    const r = await pushScopeSnapshot(state, s, selfDeviceId);
+    pushed += r.pushed;
+    assets_pushed += r.assets_pushed;
+    live_pushed += r.live_pushed;
+    for (const id of computeScopeCoverage(s)) coveredUnion.add(id);
+  }
+  const purgeR = await purgeSharedCoverage(state, coveredUnion);
+  saveSyncState(state);
+  return {
+    pulled: 0,
+    live_pulled: 0,
+    pushed,
+    renamed: 0,
+    live_pushed,
+    deleted: purgeR.deleted,
+    deletes_applied: 0,
+    assets_pushed,
+    assets_pulled: 0,
+  };
+}
+
 // ----- One-shot step driver -----
 
 export async function syncOnce(state: SyncState): Promise<SyncStepResult> {
   const self = getOrCreateDeviceId();
+  const cfg = await loadConfig();
+  if (cfg.sync_scope === "shared") {
+    return syncOnceShared(state, self.id);
+  }
   // Push first, pull second. Reasoning: if a local note collides with a
   // remote note on (thread, slug), pushing first lets the server return a
   // canonical_slug and we rename locally. The subsequent pull won't conflict
