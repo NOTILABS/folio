@@ -51,6 +51,9 @@ export interface CloudReport {
   remote?: string;
   device_id?: string;
   device_name?: string;
+  /** sc-24117: "all" (full mirror, default) or "shared" (publish-only —
+   *  only this device's active shares reach the cloud). */
+  sync_scope?: "all" | "shared";
   last_pushed_at?: string | null;
   last_pulled_seq?: number;
   /** Reachability check — null when not paired or `--offline` skipped them. */
@@ -282,10 +285,14 @@ async function collectCloud(opts: { offline: boolean }): Promise<CloudReport> {
   const state = loadSyncState();
   if (!state) return { paired: false };
 
+  const { loadConfig } = await import("../../core/config");
+  const cfg = await loadConfig();
+
   const details: string[] = [];
   const report: CloudReport = {
     paired: true,
     remote: state.remote,
+    sync_scope: cfg.sync_scope ?? "all",
     last_pushed_at: state.last_pushed_at,
     last_pulled_seq: state.last_pulled_seq,
     details,
@@ -368,6 +375,7 @@ function printCloudSection(r: CloudReport): void {
   if (r.device_id) {
     out(`  device:         ${r.device_name ?? ""} ${c.dim(r.device_id.slice(0, 12) + "…")}`);
   }
+  out(`  sync scope:     ${r.sync_scope === "shared" ? c.warn("shared") + c.dim(" (publish-only — only active shares reach the cloud)") : c.dim("all (full mirror)")}`);
   out(`  reachable:      ${formatCloudStatus(r.reachable)}`);
   out(`  token valid:    ${formatCloudStatus(r.token_valid)}`);
   out(`  last push:      ${r.last_pushed_at ? `${r.last_pushed_at} ${formatRecency(r.recency)}` : c.dim("never")}`);
