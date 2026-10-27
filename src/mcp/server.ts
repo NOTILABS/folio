@@ -27,7 +27,7 @@ import {
   suggestThread,
   stats,
 } from "../core/storage";
-import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerLocalBaseUrl, viewerShareableBaseUrl, threadAssetsDir, isSafeAssetFilename } from "../core/config";
+import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerLocalBaseUrl, viewerShareableBaseUrl, threadAssetsDir, isSafeAssetFilename, DEFAULT_SHARE_EXPIRES_DAYS } from "../core/config";
 import { scheduleAutoSync, shareHint } from "../core/sync";
 import { listThemes, getTheme } from "../core/themes";
 import { db, logEvent } from "../core/db";
@@ -1074,7 +1074,7 @@ export async function buildServer(): Promise<Server> {
             scope_type,
             scope_id: id,
             expires_in_days:
-              typeof args.expires_in_days === "number" ? args.expires_in_days : 7,
+              typeof args.expires_in_days === "number" ? args.expires_in_days : DEFAULT_SHARE_EXPIRES_DAYS,
           };
           if (typeof args.max_views === "number") body.max_views = args.max_views;
           // sc-7749: publish right after create used to 400 "note not found"

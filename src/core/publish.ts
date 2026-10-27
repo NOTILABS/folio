@@ -11,7 +11,8 @@
  * try again in a moment instead of leaking a misleading "not found".
  */
 
-import { acquireLock, releaseLock, loadSyncState, syncOnce, LockHeldError, type SyncState } from "./sync";
+import { acquireLock, releaseLock, loadSyncState, syncOnce, pushScopeSnapshot, LockHeldError, type SyncState } from "./sync";
+import { loadConfig } from "./config";
 
 export type PublishOutcome =
   | { ok: true; body: any; syncs: number; attempts: number }
@@ -74,6 +75,33 @@ async function defaultSyncStep(state: SyncState): Promise<boolean> {
   }
 }
 
+/**
+ * sc-24117: in `sync_scope: "shared"` push the snapshot of the scope about to
+ * be shared, so `POST /v1/share` finds it in the cloud. No-op in `all` mode
+ * (the regular sync tick already pushes everything). Best-effort: errors
+ * (offline, lock held by a syncer already pushing it) are swallowed — the
+ * caller's POST reports the real outcome. Used by `createShareSynced` (CLI,
+ * MCP) and by the viewer's `POST /api/notes/:id/shares`, which posts
+ * directly — every path that creates a share must go through here.
+ */
+export async function prePushSharedScope(
+  state: SyncState,
+  body: Record<string, unknown>
+): Promise<void> {
+  const scopeIdStr = typeof body.scope_id === "string" ? body.scope_id : "";
+  if (!scopeIdStr) return;
+  try {
+    const cfg = await loadConfig();
+    if (cfg.sync_scope !== "shared") return;
+    const scope_type = (body.scope_type === "thread" || body.scope_type === "set")
+      ? body.scope_type
+      : "note";
+    await pushScopeSnapshot(state, { scope_type, scope_id: scopeIdStr });
+  } catch {
+    // Swallowed — see doc comment.
+  }
+}
+
 export async function createShareSynced(
   state: SyncState,
   body: Record<string, unknown>,
@@ -85,6 +113,15 @@ export async function createShareSynced(
   const syncStep = opts.syncStep ?? defaultSyncStep;
   const deadline = Date.now() + timeoutMs;
   const scope = `${String(body.scope_type ?? "note")} ${String(body.scope_id ?? "")}`;
+
+  // sc-24117: in `sync_scope: "shared"` the normal sync tick never does a
+  // blanket push, so a brand-new share would otherwise have to wait for
+  // the not-synced retry loop below to kick off a full `syncOnce` (which
+  // itself only pushes existing-share coverage — this share doesn't exist
+  // yet, so it wouldn't be covered). Push this scope's snapshot directly,
+  // before the first POST, so the common case needs no retry at all. The
+  // not-synced retry loop is the safety net either way.
+  await prePushSharedScope(state, body);
 
   let attempts = 0;
   let syncs = 0;

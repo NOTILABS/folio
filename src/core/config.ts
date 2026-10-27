@@ -32,7 +32,22 @@ export interface FolioConfig {
    *  it coexists with a standalone `folio sync` daemon (a tick is skipped if
    *  one is already running). Default on; set false to require explicit sync. */
   auto_sync?: boolean;
+  /** sc-24117: scope of what `syncOnce` pushes to the cloud. "all" (default,
+   *  unchanged) pushes every local note. "shared" pushes ONLY the snapshot
+   *  covered by this device's active shares (note/thread/set) — the cloud
+   *  becomes a publish-only relay instead of a full mirror — and skips
+   *  `pullNotes` entirely (the box stays the source of truth). Fleet-wide
+   *  rollout is a separate OTA story; this is just the per-device switch.
+   *  Env override: FOLIO_SYNC_SCOPE. */
+  sync_scope?: "all" | "shared";
 }
+
+/** sc-24117: the `expires_in_days ?? 7` literal was duplicated across the
+ *  cloud share-create route and every client that calls it (CLI publish,
+ *  MCP publish, viewer share API). One constant so they can't drift. The
+ *  value itself is unchanged pending a product decision — do not edit here
+ *  without updating all call sites' docs/descriptions too. */
+export const DEFAULT_SHARE_EXPIRES_DAYS = 7;
 
 export const DEFAULT_CONFIG: FolioConfig = {
   theme: "linen",
@@ -188,13 +203,23 @@ export function bundledOgDir(): string {
   return join(import.meta.dir, "..", "..", "og");
 }
 
+/** FOLIO_SYNC_SCOPE overrides the config file's `sync_scope`, same spirit as
+ *  FOLIO_HOME overriding folioRoot() — lets an OTA flip the fleet's sync mode
+ *  via env without rewriting every box's folio.config.json. Invalid values
+ *  are ignored (keep whatever loadConfig resolved from the file/default). */
+function applySyncScopeEnvOverride(cfg: FolioConfig): FolioConfig {
+  const envScope = process.env.FOLIO_SYNC_SCOPE;
+  if (envScope === "all" || envScope === "shared") cfg.sync_scope = envScope;
+  return cfg;
+}
+
 export async function loadConfig(): Promise<FolioConfig> {
-  if (!existsSync(configPath())) return { ...DEFAULT_CONFIG };
+  if (!existsSync(configPath())) return applySyncScopeEnvOverride({ ...DEFAULT_CONFIG });
   try {
     const raw = await Bun.file(configPath()).text();
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    return applySyncScopeEnvOverride({ ...DEFAULT_CONFIG, ...JSON.parse(raw) });
   } catch {
-    return { ...DEFAULT_CONFIG };
+    return applySyncScopeEnvOverride({ ...DEFAULT_CONFIG });
   }
 }
 

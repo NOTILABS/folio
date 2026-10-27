@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerPublicBaseUrl, threadAssetsDir, isSafeAssetFilename } from "../core/config";
+import { loadConfig, folioRoot, bundledThemesDir, themesDir, viewerPublicBaseUrl, threadAssetsDir, isSafeAssetFilename, DEFAULT_SHARE_EXPIRES_DAYS } from "../core/config";
 import { listNotes, searchNotes, getNoteMeta, readNoteHtml, stats, finalize, deleteNote, listThreads, listPopularTags, listNotesByTag, listProjectThreads, getProjectDashboard, updateNoteMetadata, listContinueRail, logNoteView } from "../core/storage";
 import { db } from "../core/db";
 import { pageList, pageSearch, pageThread, pageThreads, pageNote, pageStats, pageError, pageTag, pageCloud, pageShares, pageProject } from "./render";
@@ -787,7 +787,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
             // links to (computed cloud-side from synced bodies).
             scope_type: body.include_linked ? "set" : "note",
             scope_id: id,
-            expires_in_days: body.expires_in_days ?? 7,
+            expires_in_days: body.expires_in_days ?? DEFAULT_SHARE_EXPIRES_DAYS,
             max_views: body.max_views ?? null,
           };
           if (body.allow_pick) payload.allow_pick = true;
@@ -797,6 +797,10 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
             payload.recipient_email_hash = recipientEmailHash(plain);
             payload.recipient_email = plain;
           }
+          // sc-24117: in `sync_scope: "shared"` an unshared note is not in
+          // the cloud, so push its snapshot first (no-op in `all` mode).
+          const { prePushSharedScope } = await import("../core/publish");
+          await prePushSharedScope(state, payload);
           const res = await fetch(`${state.remote}/v1/share`, {
             method: "POST",
             headers: {
@@ -852,7 +856,19 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
             let detail = ""; try { detail = await res.text(); } catch {}
             return jsonResp({ error: `cloud rejected: HTTP ${res.status} ${detail.slice(0, 200)}` }, 502);
           }
-          return jsonResp(await res.json());
+          const revokeBody = await res.json();
+          // sc-24117: in `sync_scope: "shared"` the revoked scope's snapshot
+          // should disappear from the cloud right away, not at the next
+          // sync tick. Best-effort — the tick is the safety net if this
+          // fails (e.g. GET /v1/shares flaking right after the revoke).
+          try {
+            const cfg = await loadConfig();
+            if (cfg.sync_scope === "shared") {
+              const { purgeSharedAfterRevoke } = await import("../core/sync");
+              await purgeSharedAfterRevoke(state);
+            }
+          } catch {}
+          return jsonResp(revokeBody);
         }
 
         // POST /api/sync/run — one-shot sync (mirrors `folio sync --once`)
