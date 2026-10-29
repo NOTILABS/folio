@@ -6,6 +6,7 @@ import { db } from "../core/db";
 import { pageList, pageSearch, pageThread, pageThreads, pageNote, pageStats, pageError, pageTag, pageCloud, pageShares, pageProject } from "./render";
 import { injectBootstrap } from "./note-bootstrap";
 import { rawNoteHeaders } from "../core/csp";
+import { cloudFetch } from "../core/cloud-auth";
 import pkg from "../../package.json" with { type: "json" };
 import type { NoteType } from "../core/types";
 
@@ -315,8 +316,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           if (state) {
             paired = true;
             try {
-              const res = await fetch(`${state.remote}/v1/shares?scope_id=${encodeURIComponent(id)}`, {
-                headers: { Authorization: `Bearer ${state.device_token}` },
+              const res = await cloudFetch(state, `${state.remote}/v1/shares?scope_id=${encodeURIComponent(id)}`, {
               });
               if (res.ok) {
                 const data = (await res.json()) as { shares?: any[] };
@@ -635,24 +635,26 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           const { getOrCreateDeviceId } = await import("../core/config");
           const dev = getOrCreateDeviceId();
           const name = String(body.device_name ?? "").trim() || dev.name;
-          const res = await fetch(`${remote}/v1/auth/pair`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ code, device_name: name, device_id: dev.id }),
-          });
-          if (!res.ok) {
-            let detail = ""; try { detail = await res.text(); } catch {}
-            return jsonResp({ error: `pair failed: HTTP ${res.status} ${detail.slice(0, 200)}` }, 502);
+          // sc-24117: pair with a device key (see core/cloud-auth.ts).
+          const { pairWithKey } = await import("../core/cloud-auth");
+          let paired;
+          try {
+            paired = await pairWithKey(remote, code, name, dev.id);
+          } catch (e: any) {
+            return jsonResp({ error: String(e?.message ?? e) }, 502);
           }
-          const out = (await res.json()) as { device_id: string; token: string };
           const { saveSyncState } = await import("../core/sync");
           saveSyncState({
             remote,
-            device_token: out.token,
+            device_id: paired.device_id,
+            ...(paired.key_alg
+              ? { key_alg: paired.key_alg, ...(paired.signer_url ? { signer_url: paired.signer_url } : {}) }
+              : { device_token: paired.token }),
             last_pulled_seq: 0,
             last_pushed_at: null,
             last_live_pushed: {},
           });
+          const out = { device_id: paired.device_id };
           return jsonResp({ ok: true, device_id: out.device_id });
         }
 
@@ -662,9 +664,8 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           const { loadSyncState } = await import("../core/sync");
           const state = loadSyncState();
           if (!state) return jsonResp({ error: "not paired" }, 400);
-          const res = await fetch(`${state.remote}/v1/auth/pair-code`, {
+          const res = await cloudFetch(state, `${state.remote}/v1/auth/pair-code`, {
             method: "POST",
-            headers: { Authorization: `Bearer ${state.device_token}` },
           });
           if (!res.ok) {
             let detail = ""; try { detail = await res.text(); } catch {}
@@ -682,8 +683,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           const state = loadSyncState();
           if (!state) return jsonResp({ error: "not paired" }, 400);
           try {
-            const res = await fetch(`${state.remote}/v1/admin/stats`, {
-              headers: { Authorization: `Bearer ${state.device_token}` },
+            const res = await cloudFetch(state, `${state.remote}/v1/admin/stats`, {
             });
             if (!res.ok) {
               let detail = ""; try { detail = await res.text(); } catch {}
@@ -709,7 +709,6 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           const init: RequestInit = {
             method: req.method,
             headers: {
-              Authorization: `Bearer ${state.device_token}`,
               "Content-Type": "application/json",
             },
           };
@@ -721,7 +720,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
             }
           }
           try {
-            const res = await fetch(cloudUrl, init);
+            const res = await cloudFetch(state, cloudUrl, init);
             const body = await res.text();
             return new Response(body, {
               status: res.status,
@@ -801,10 +800,9 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           // the cloud, so push its snapshot first (no-op in `all` mode).
           const { prePushSharedScope } = await import("../core/publish");
           await prePushSharedScope(state, payload);
-          const res = await fetch(`${state.remote}/v1/share`, {
+          const res = await cloudFetch(state, `${state.remote}/v1/share`, {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${state.device_token}`,
               "content-type": "application/json",
             },
             body: JSON.stringify(payload),
@@ -828,8 +826,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           // a 412 every page load would noise up the console for solo-use
           // (non-paired) workflows.
           if (!state) return jsonResp({ paired: false, shares: [] });
-          const res = await fetch(`${state.remote}/v1/shares?scope_id=${encodeURIComponent(id)}`, {
-            headers: { Authorization: `Bearer ${state.device_token}` },
+          const res = await cloudFetch(state, `${state.remote}/v1/shares?scope_id=${encodeURIComponent(id)}`, {
           });
           if (!res.ok) {
             return jsonResp({ paired: true, shares: [], error: `cloud HTTP ${res.status}` });
@@ -848,9 +845,8 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           const { loadSyncState } = await import("../core/sync");
           const state = loadSyncState();
           if (!state) return jsonResp({ error: "cloud not paired", code: "NOT_PAIRED" }, 412);
-          const res = await fetch(`${state.remote}/v1/share/${encodeURIComponent(token)}`, {
+          const res = await cloudFetch(state, `${state.remote}/v1/share/${encodeURIComponent(token)}`, {
             method: "DELETE",
-            headers: { Authorization: `Bearer ${state.device_token}` },
           });
           if (!res.ok) {
             let detail = ""; try { detail = await res.text(); } catch {}
@@ -893,8 +889,7 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           // Best-effort revoke: list devices, find one with matching name,
           // DELETE it. Network/auth errors don't block local cleanup.
           try {
-            const listRes = await fetch(`${state.remote}/v1/auth/devices`, {
-              headers: { Authorization: `Bearer ${state.device_token}` },
+            const listRes = await cloudFetch(state, `${state.remote}/v1/auth/devices`, {
             });
             if (listRes.ok) {
               const { getOrCreateDeviceId } = await import("../core/config");
@@ -902,9 +897,8 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
               const { devices } = (await listRes.json()) as { devices: { id: string; name: string }[] };
               const me = devices.find((d) => d.id === dev.id) ?? devices.find((d) => d.name === dev.name);
               if (me) {
-                await fetch(`${state.remote}/v1/auth/device/${me.id}`, {
+                await cloudFetch(state, `${state.remote}/v1/auth/device/${me.id}`, {
                   method: "DELETE",
-                  headers: { Authorization: `Bearer ${state.device_token}` },
                 });
               }
             }

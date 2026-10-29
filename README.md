@@ -172,7 +172,8 @@ iteration_state({ note_id })                                → snapshot
 | `folio reindex` | Rebuild FTS index from files on disk |
 | `folio stats` | Counts + analytics |
 | `folio serve` | Local viewer on `:4810` |
-| `folio sync pair --remote <url> --code <6-digit>` | Pair this device with a Folio Cloud relay |
+| `folio sync pair --remote <url> --code <6-digit> [--signer <url>]` | Pair this device with a Folio Cloud relay using a device key (local ed25519 in `~/Folio/.device-key.pem`, or the NotiBox gate's P-256 key via `--signer` / `$FOLIO_CLOUD_SIGNER`) — no shared token on disk |
+| `folio sync pin-key [--signer <url>]` | One-time upgrade of a device paired with a bearer token to a device key; the old token stops working |
 | `folio sync [--once] [--interval 30]` | Push/pull daemon (or one-shot) against the paired cloud |
 | `folio sync status` / `unpair` | Inspect / clear local sync state |
 | `folio publish <id\|thread:slug> [--expires-days 7] [--max-views N] [--allow-pick]` | Mint a capability URL share (`--allow-pick`: recipient can choose a `data-folio-pick` variant) |

@@ -33,6 +33,11 @@ import {
   isPublicPath,
   listDevices,
   revokeDevice,
+  authenticateSigned,
+  extractSignature,
+  normalizePublicKey,
+  verifyProofOfPossession,
+  pinDeviceKey,
   type Device,
 } from "./auth";
 import {
@@ -728,15 +733,29 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
       // headers (browser API), so the token rides in a query param. We
       // accept either header or query param ONLY for that route, and only
       // for that route — every other path stays bearer-header-only.
+      //
+      // sc-24117: a request carrying x-folio-sig authenticates by device-key
+      // signature instead (devices with a pinned key have no live bearer).
+      // The body is read from a clone so handlers below still see it.
+      // /v1/auth/pin-key is the one bearer route that also carries a
+      // signature — that signature is proof of possession of the key being
+      // pinned, checked by the handler, so the middleware uses the bearer.
       let device: Device | null = null;
       if (!isPublicPath(path)) {
-        let token = extractBearer(req);
-        if (!token && path === "/v1/sync/live-stream") {
-          token = url.searchParams.get("token");
+        const signed = path === "/v1/auth/pin-key" ? null : extractSignature(req);
+        if (signed) {
+          const rawBody = new Uint8Array(await req.clone().arrayBuffer());
+          device = authenticateSigned(req, signed, rawBody);
+          if (!device) return unauthorized();
+        } else {
+          let token = extractBearer(req);
+          if (!token && path === "/v1/sync/live-stream") {
+            token = url.searchParams.get("token");
+          }
+          if (!token) return unauthorized();
+          device = authenticate(token);
+          if (!device) return unauthorized();
         }
-        if (!token) return unauthorized();
-        device = authenticate(token);
-        if (!device) return unauthorized();
       }
 
       try {
@@ -793,12 +812,28 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
         }
 
         if (path === "/v1/auth/pair" && method === "POST") {
-          const body = await readJsonBody<{ code?: string; device_name?: string; device_id?: string }>(req);
+          const raw = new Uint8Array(await req.clone().arrayBuffer());
+          const body = await readJsonBody<{
+            code?: string; device_name?: string; device_id?: string; public_key?: string; key_alg?: string;
+          }>(req);
           if (!body.code) return badRequest("code required");
           if (!body.device_name) return badRequest("device_name required");
           try {
-            const { deviceId, token } = consumePairingCode(body.code, body.device_name, body.device_id);
-            return json({ device_id: deviceId, token });
+            // sc-24117: pairing with a key pins it and returns no bearer.
+            // The pair request itself must be signed with that key, as the
+            // device_id it claims (proof of possession).
+            let key: { publicKeyPem: string; alg: "ed25519" | "p256" } | undefined;
+            if (body.public_key !== undefined || body.key_alg !== undefined) {
+              if (!body.public_key || !body.key_alg) return badRequest("public_key and key_alg go together");
+              if (!body.device_id) return badRequest("device_id required when pairing with a key");
+              const k = normalizePublicKey(body.public_key, body.key_alg);
+              verifyProofOfPossession(req, raw, body.device_id, k.key, k.alg);
+              key = { publicKeyPem: k.pem, alg: k.alg };
+            }
+            const { deviceId, token } = consumePairingCode(body.code, body.device_name, body.device_id, undefined, key);
+            return key
+              ? json({ device_id: deviceId, key_pinned: true, key_alg: key.alg })
+              : json({ device_id: deviceId, token });
           } catch (e: any) {
             return badRequest(e?.message ?? "pairing failed");
           }
@@ -905,6 +940,24 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
 
         // ----- Authed paths below -----
         if (!device) return unauthorized(); // belt-and-braces; isPublicPath gate above ensures this
+
+        // sc-24117: move an already-paired (bearer) device onto a key.
+        // Bearer authenticates the device; the signature in the same
+        // request proves possession of the new key. On success the bearer
+        // is dead — the client must drop device_token from its state.
+        if (path === "/v1/auth/pin-key" && method === "POST") {
+          const raw = new Uint8Array(await req.clone().arrayBuffer());
+          const body = await readJsonBody<{ public_key?: string; key_alg?: string }>(req);
+          if (!body.public_key || !body.key_alg) return badRequest("public_key and key_alg required");
+          try {
+            const k = normalizePublicKey(body.public_key, body.key_alg);
+            verifyProofOfPossession(req, raw, null, k.key, k.alg);
+            pinDeviceKey(device!.id, k.pem, k.alg);
+            return json({ device_id: device!.id, key_pinned: true, key_alg: k.alg });
+          } catch (e: any) {
+            return badRequest(e?.message ?? "pin-key failed");
+          }
+        }
 
         if (path === "/v1/auth/devices" && method === "GET") {
           // Caller only sees their own user's devices (v0.13+).

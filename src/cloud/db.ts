@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS devices (
   paired_at TEXT NOT NULL,       -- ISO 8601
   last_seen_at TEXT,             -- updated on each authed request (throttled)
   revoked_at TEXT,               -- null = active; set = denies all requests
-  user_id TEXT NOT NULL DEFAULT 'default'
+  user_id TEXT NOT NULL DEFAULT 'default',
+  public_key TEXT,               -- sc-24117: SPKI PEM; set = requests signed, bearer dead
+  key_alg TEXT                   -- sc-24117: 'ed25519' | 'p256'
 );
 CREATE INDEX IF NOT EXISTS devices_by_token ON devices(token_hash) WHERE revoked_at IS NULL;
 -- user-specific indexes created by ensureMultiUserSchema() so the bootstrap
@@ -428,6 +430,14 @@ function ensureMultiUserSchema(db: Database): void {
     db.exec("PRAGMA foreign_keys = ON");
   }
   } // end if (!hasNewUnique) — UNIQUE rebuild block
+
+  // sc-24117: devices.public_key + key_alg (device-key request signing).
+  // Same unconditional idempotent-ALTER pattern as inline_render below.
+  {
+    const cols = db.query<{ name: string }, []>("PRAGMA table_info(devices)").all();
+    if (!cols.some((c) => c.name === "public_key")) db.exec("ALTER TABLE devices ADD COLUMN public_key TEXT");
+    if (!cols.some((c) => c.name === "key_alg")) db.exec("ALTER TABLE devices ADD COLUMN key_alg TEXT");
+  }
 
   // v0.17: notes.inline_render. ALWAYS runs (outside the UNIQUE-rebuild
   // branch above) so clouds created with v0.13+ schema directly — which
