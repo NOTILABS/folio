@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { c, out, err, json as jsonOut } from "../io";
 import { loadSyncState, purgeSharedAfterRevoke } from "../../core/sync";
 import { getNoteMeta } from "../../core/storage";
+import { cloudFetch } from "../../core/cloud-auth";
 import { createShareSynced } from "../../core/publish";
 import { DEFAULT_SHARE_EXPIRES_DAYS, loadConfig } from "../../core/config";
 
@@ -191,8 +192,7 @@ async function listSharesCmd(
   const params = new URLSearchParams();
   if (opts.forId) params.set("scope_id", opts.forId);
   const url = `${state!.remote}/v1/shares${params.toString() ? "?" + params.toString() : ""}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${state!.device_token}` },
+  const res = await cloudFetch(state!, url, {
   });
   if (!res.ok) {
     let detail = "";
@@ -245,9 +245,8 @@ async function revokeShareCmd(
     err(c.err("✗ token required: folio shares revoke <token>\n"));
     return 3;
   }
-  const res = await fetch(`${state!.remote}/v1/share/${encodeURIComponent(opts.token)}`, {
+  const res = await cloudFetch(state!, `${state!.remote}/v1/share/${encodeURIComponent(opts.token)}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${state!.device_token}` },
   });
   if (!res.ok) {
     let detail = "";

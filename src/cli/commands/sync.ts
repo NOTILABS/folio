@@ -29,12 +29,15 @@ import {
   type SyncState,
 } from "../../core/sync";
 import { getOrCreateDeviceId } from "../../core/config";
+import { cloudFetch, pairWithKey, pinKey, defaultSignerUrl, deviceKeyPath } from "../../core/cloud-auth";
 
 export interface SyncOpts {
   sub?: string;
   remote?: string;
   code?: string;
   name?: string;
+  /** sc-24117: gate signer URL (NotiBox, p256). Default: $FOLIO_CLOUD_SIGNER; none = local ed25519 key. */
+  signer?: string;
   once?: boolean;
   interval?: number;
   jsonOut?: boolean;
@@ -48,13 +51,15 @@ export async function syncCmd(opts: SyncOpts): Promise<number> {
       return statusCmd(opts);
     case "unpair":
       return unpairCmd(opts);
+    case "pin-key":
+      return pinKeyCmd(opts);
     case undefined:
     case "":
     case "run":
       return runCmd(opts);
     default:
       err(c.err(`✗ Unknown sync subcommand: ${opts.sub}\n`));
-      err("Usage: folio sync {pair|status|unpair|run}\n");
+      err("Usage: folio sync {pair|status|unpair|pin-key|run}\n");
       return 1;
   }
 }
@@ -68,35 +73,42 @@ async function pairCmd(opts: SyncOpts): Promise<number> {
   // use locally. Without this the two sides drift and own-echo skip breaks.
   const localDev = getOrCreateDeviceId();
 
-  const res = await fetch(`${remote}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: opts.code, device_name: name, device_id: localDev.id }),
-  });
-  if (!res.ok) {
-    let detail = ""; try { detail = await res.text(); } catch {}
-    err(c.err(`✗ pair failed: HTTP ${res.status} ${detail.slice(0, 200)}\n`));
+  // sc-24117: pair with a device key (local ed25519, or the gate's p256
+  // via --signer / $FOLIO_CLOUD_SIGNER). No shared token lands on disk.
+  let paired;
+  try {
+    paired = await pairWithKey(remote, opts.code, name, localDev.id, opts.signer ?? defaultSignerUrl());
+  } catch (e: any) {
+    err(c.err(`✗ ${e?.message ?? e}\n`));
     return 3;
   }
-  const body = (await res.json()) as { device_id: string; token: string };
   const state: SyncState = {
     remote,
-    device_token: body.token,
+    device_id: paired.device_id,
     last_pulled_seq: 0,
     last_pushed_at: null,
     last_live_pushed: {},
   };
+  if (paired.key_alg) {
+    state.key_alg = paired.key_alg;
+    if (paired.signer_url) state.signer_url = paired.signer_url;
+  } else {
+    state.device_token = paired.token;
+  }
   saveSyncState(state); // saves chmod 600 — see saveSyncState in core/sync.ts
   const dev = getOrCreateDeviceId();
-  // Output a short fingerprint of the token for human verification without
-  // exposing the full bearer. The actual token lives only in the state file
-  // (mode 0600). Avoids the trap where someone screen-shares or pastes the
-  // CLI confirmation into chat — fingerprint is useless on its own.
-  const fp = tokenFingerprint(body.token);
   out(c.ok("✓") + ` Paired with ${c.cyan(remote)}`);
-  out(`  device_id:  ${c.dim(body.device_id)}`);
+  out(`  device_id:  ${c.dim(paired.device_id)}`);
   out(`  local id:   ${c.dim(dev.id)}`);
-  out(`  token fp:   ${c.dim(fp)} ${c.dim("(stored in ~/Folio/.sync-state.json, mode 0600)")}`);
+  if (paired.key_alg) {
+    const where = paired.signer_url ? `signed by ${paired.signer_url}` : `key in ${deviceKeyPath()}, mode 0600`;
+    out(`  auth:       ${c.dim(`${paired.key_alg} device key (${where})`)}`);
+  } else {
+    // Output a short fingerprint of the token for human verification without
+    // exposing the full bearer. Cloud predates device keys → bearer fallback.
+    out(`  token fp:   ${c.dim(tokenFingerprint(paired.token!))} ${c.dim("(stored in ~/Folio/.sync-state.json, mode 0600)")}`);
+    out(c.warn("  ! cloud does not support device keys yet — paired with a bearer token; run `folio sync pin-key` after the cloud upgrade"));
+  }
   out("");
   out(c.dim("  Run `folio sync` to start the daemon, or `folio sync --once` for cron mode."));
   return 0;
@@ -114,6 +126,28 @@ function tokenFingerprint(token: string): string {
   return `${token.slice(0, 4)}…${token.slice(-4)}`;
 }
 
+/**
+ * sc-24117: one-time upgrade of a bearer-paired device to a device key.
+ * After it the cloud refuses the old token and .sync-state.json holds no
+ * credential at all (the private key is in ~/Folio/.device-key.pem, 0600,
+ * or stays inside the NotiBox gate with --signer).
+ */
+async function pinKeyCmd(opts: SyncOpts): Promise<number> {
+  const state = loadSyncState();
+  if (!state) { err(c.err("✗ Not paired. Run: folio sync pair --remote <url> --code <6-digit>\n")); return 2; }
+  if (state.key_alg) { out(c.dim(`Already on a device key (${state.key_alg}) — nothing to do.`)); return 0; }
+  const localDev = getOrCreateDeviceId();
+  try {
+    await pinKey(state, localDev.id, opts.signer ?? defaultSignerUrl());
+  } catch (e: any) {
+    err(c.err(`✗ ${e?.message ?? e}\n`));
+    return 3;
+  }
+  saveSyncState(state);
+  out(c.ok("✓") + ` Device key pinned on ${c.cyan(state.remote)} (${state.key_alg}); bearer token revoked and removed from .sync-state.json`);
+  return 0;
+}
+
 async function statusCmd(opts: SyncOpts): Promise<number> {
   const state = loadSyncState();
   if (!state) {
@@ -124,6 +158,7 @@ async function statusCmd(opts: SyncOpts): Promise<number> {
     out(JSON.stringify({
       remote: state.remote,
       paired: true,
+      auth: state.key_alg ? `key:${state.key_alg}` : "bearer",
       last_pulled_seq: state.last_pulled_seq,
       last_pushed_at: state.last_pushed_at,
       live_notes_tracked: Object.keys(state.last_live_pushed ?? {}).length,
@@ -133,6 +168,7 @@ async function statusCmd(opts: SyncOpts): Promise<number> {
   const dev = getOrCreateDeviceId();
   out(c.bold("Folio sync status"));
   out(`  remote:              ${c.cyan(state.remote)}`);
+  out(`  auth:                ${state.key_alg ? `${state.key_alg} device key` : c.warn("bearer token (run `folio sync pin-key`)")}`);
   out(`  device_id:           ${dev.id} (${dev.name})`);
   out(`  last_pulled_seq:     ${state.last_pulled_seq}`);
   out(`  last_pushed_at:      ${state.last_pushed_at ?? c.dim("(never)")}`);
@@ -148,16 +184,14 @@ async function unpairCmd(_opts: SyncOpts): Promise<number> {
   }
   // Look up our device id from the server's perspective so we can DELETE.
   try {
-    const listRes = await fetch(`${state.remote}/v1/auth/devices`, {
-      headers: { Authorization: `Bearer ${state.device_token}` },
+    const listRes = await cloudFetch(state, `${state.remote}/v1/auth/devices`, {
     });
     if (listRes.ok) {
       const { devices } = (await listRes.json()) as { devices: { id: string; name: string }[] };
       const me = devices.find((d) => d.name === hostname());
       if (me) {
-        await fetch(`${state.remote}/v1/auth/device/${me.id}`, {
+        await cloudFetch(state, `${state.remote}/v1/auth/device/${me.id}`, {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${state.device_token}` },
         });
         out(c.ok("✓") + ` Revoked device ${c.dim(me.id)} on ${state.remote}`);
       }

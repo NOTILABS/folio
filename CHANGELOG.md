@@ -2,6 +2,21 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## Unreleased
+
+**Added — device-key authentication for cloud sync (sc-24117, PR B).** A paired device no longer has to keep a long-lived bearer token in `~/Folio/.sync-state.json` (the token that travelled in a golden image). Requests are signed with a per-device key and the cloud stores only the public half.
+
+### Added
+
+- **Signed requests `folio-sync-v1`**: headers `x-folio-device`, `x-folio-ts` (unix ms), `x-folio-nonce`, `x-folio-sig` over `folio-sync-v1\nMETHOD\npath+query\nts\nnonce\nsha256(body)`. Cloud accepts ±5 min skew and each nonce once; ed25519 and P-256 (IEEE-P1363 or DER).
+- **`folio sync pair`** (CLI and viewer `/cloud`) pairs with a key: local ed25519 (`~/Folio/.device-key.pem`, 0600), or P-256 held by the NotiBox gate via `--signer <url>` / `$FOLIO_CLOUD_SIGNER` (contract: `POST {payload}` → `{sig, alg:"p256", public_key}`). The pair request is signed (proof of possession); the cloud returns no token. Against a cloud without this change pairing falls back to a bearer token.
+- **`folio sync pin-key`** + cloud `POST /v1/auth/pin-key`: moves a bearer-paired device onto a key; the cloud kills the bearer and the client drops `device_token` from its state.
+- Cloud schema: `devices.public_key`, `devices.key_alg` (idempotent `ALTER`).
+
+### Unchanged
+
+- Browser/PWA devices and devices not upgraded keep using bearer tokens. `/p/<token>/…` share links are not affected.
+
 ## v0.45.0 — 2026-10-28
 
 **Added — publish-only cloud sync: `sync_scope: "shared"` (sc-24117, #114).** Until now a paired device mirrored every note to the cloud, although only a small part of them was ever shared. In the new mode only snapshots of notes, threads and sets covered by an active share reach the cloud; revoking or expiring a share deletes its snapshot there. The default stays `all` (full mirror, no behaviour change) — switching a device is a config change.

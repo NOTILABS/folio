@@ -13,6 +13,7 @@
 
 import { acquireLock, releaseLock, loadSyncState, syncOnce, pushScopeSnapshot, LockHeldError, type SyncState } from "./sync";
 import { loadConfig } from "./config";
+import { cloudFetch } from "./cloud-auth";
 
 export type PublishOutcome =
   | { ok: true; body: any; syncs: number; attempts: number }
@@ -134,10 +135,9 @@ export async function createShareSynced(
     attempts++;
     let res: Response | null = null;
     try {
-      res = await fetch(`${state.remote}/v1/share`, {
+      res = await cloudFetch(state, `${state.remote}/v1/share`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${state.device_token}`,
           "content-type": "application/json",
         },
         body: JSON.stringify(body),

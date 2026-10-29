@@ -37,6 +37,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendF
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { db } from "./db";
+import { cloudFetch, type KeyAlg } from "./cloud-auth";
 import { folioRoot, threadsDir, threadAssetsDir, getOrCreateDeviceId, configPath, isSafeAssetFilename, loadConfig } from "./config";
 import { renderNote } from "./templates";
 import { getTheme } from "./themes";
@@ -52,7 +53,14 @@ const LOCK_FILENAME = ".sync.lock";
 
 export interface SyncState {
   remote: string;
-  device_token: string;
+  /** Legacy bearer token. Absent once a device key is pinned (sc-24117). */
+  device_token?: string;
+  /** sc-24117: set when the cloud holds this device's public key; requests are signed instead of bearer. */
+  key_alg?: KeyAlg;
+  /** sc-24117: cloud-side device id, sent as x-folio-device on signed requests. */
+  device_id?: string;
+  /** sc-24117: p256 only — local gate endpoint that signs with the box identity key. */
+  signer_url?: string;
   last_pulled_seq: number;
   last_pushed_at: string | null; // ISO; null on first run
   /** Per-note last entry id pushed to cloud, for incremental live-entry push. */
@@ -182,19 +190,16 @@ export function releaseLock(): void {
 async function http<T = unknown>(
   method: "GET" | "POST" | "DELETE" | "HEAD",
   url: string,
-  token: string,
+  state: SyncState,
   body?: unknown
 ): Promise<T | null> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-  };
-  let init: RequestInit = { method, headers };
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const init: RequestInit = { method, headers };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
-    (init as any).body = JSON.stringify(body);
+    init.body = JSON.stringify(body);
   }
-  const res = await fetch(url, init);
+  const res = await cloudFetch(state, url, init);
   if (!res.ok) {
     let detail = "";
     try { detail = await res.text(); } catch {}
@@ -284,18 +289,16 @@ export async function ensureAssetsOnCloud(
     }
     // HEAD: skip upload if cloud already has these bytes.
     try {
-      const head = await fetch(`${state.remote}/v1/sync/assets/${hash}`, {
+      const head = await cloudFetch(state, `${state.remote}/v1/sync/assets/${hash}`, {
         method: "HEAD",
-        headers: { Authorization: `Bearer ${state.device_token}` },
       });
       if (head.ok) { skipped++; continue; }
     } catch {
       // Network error — try POST anyway; it'll fail similarly if the network is dead.
     }
-    const res = await fetch(`${state.remote}/v1/sync/assets/${hash}`, {
+    const res = await cloudFetch(state, `${state.remote}/v1/sync/assets/${hash}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${state.device_token}`,
         "Content-Type": "application/octet-stream",
         "X-Folio-Filename": r.filename,
         "X-Folio-Thread-Id": r.thread_id,
@@ -485,7 +488,7 @@ export async function pushDeletes(state: SyncState, selfDeviceId: string): Promi
   await http<{ deletes: string[]; cursor: number }>(
     "POST",
     `${state.remote}/v1/sync/push`,
-    state.device_token,
+    state,
     { deletes: uuids }
   );
   state.last_delete_pushed_at = rows.reduce((acc, r) => (r.updated > acc ? r.updated : acc), cursor);
@@ -603,7 +606,7 @@ export async function pushNotes(state: SyncState, selfDeviceId: string): Promise
 
   const payloads: PushNotePayload[] = buildNotePayloads(rows);
 
-  const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state.device_token, {
+  const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state, {
     notes: payloads,
   });
   if (!resp) throw new Error("push: empty response");
@@ -660,7 +663,7 @@ export async function pushSupersedes(state: SyncState, selfDeviceId: string): Pr
     .all(selfDeviceId, cursor);
   if (rows.length === 0) return 0;
   const payloads = buildNotePayloads(rows);
-  const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state.device_token, {
+  const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state, {
     notes: payloads,
   });
   if (!resp) throw new Error("pushSupersedes: empty response");
@@ -727,7 +730,7 @@ export async function pushLiveEntries(
   const CHUNK = 200;
   for (let i = 0; i < allEntries.length; i += CHUNK) {
     const slice = allEntries.slice(i, i + CHUNK);
-    await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state.device_token, {
+    await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state, {
       live_entries: slice,
     });
   }
@@ -800,7 +803,7 @@ export async function pullAssets(
 
 export async function pullNotes(state: SyncState, selfDeviceId: string): Promise<{ pulled: number; live_pulled: number; deletes_applied: number; assets_pulled: number }> {
   const url = `${state.remote}/v1/sync/pull?since=${state.last_pulled_seq}`;
-  const resp = await http<PullResp>("GET", url, state.device_token);
+  const resp = await http<PullResp>("GET", url, state);
   if (!resp) throw new Error("pull: empty response");
 
   let pulled = 0;
@@ -1152,7 +1155,7 @@ export async function fetchActiveShares(state: SyncState): Promise<RemoteShareSu
   const resp = await http<{ shares: RemoteShareSummary[] }>(
     "GET",
     `${state.remote}/v1/shares`,
-    state.device_token
+    state
   );
   if (!resp) throw new Error("GET /v1/shares: empty response");
   const now = Date.now();
@@ -1195,7 +1198,7 @@ export async function pushScopeSnapshot(
   for (let i = 0; i < stale.length; i += CHUNK) {
     const slice = stale.slice(i, i + CHUNK);
     const payloads = buildNotePayloads(slice);
-    const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state.device_token, {
+    const resp = await http<PushAcceptedResp>("POST", `${state.remote}/v1/sync/push`, state, {
       notes: payloads,
     });
     if (!resp) throw new Error("pushScopeSnapshot: empty response");
@@ -1238,7 +1241,7 @@ export async function purgeSharedCoverage(
   state.shared_pushed = state.shared_pushed ?? {};
   const stale = Object.keys(state.shared_pushed).filter((id) => !coveredIds.has(id));
   if (stale.length === 0) return { deleted: 0 };
-  await http("POST", `${state.remote}/v1/sync/push`, state.device_token, { deletes: stale });
+  await http("POST", `${state.remote}/v1/sync/push`, state, { deletes: stale });
   for (const id of stale) delete state.shared_pushed![id];
   return { deleted: stale.length };
 }

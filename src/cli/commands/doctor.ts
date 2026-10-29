@@ -13,6 +13,7 @@ import { check as checkClaudeCode, claudeCodePaths, mcpCommand, skillSourcePath 
 import { check as checkOpenclaw, openclawPaths, isOpenclawPresent } from "../install/openclaw";
 import { bundledSkillsDir, bundledThemesDir, bundledTemplatesDir, folioRoot, dbPath, configPath } from "../../core/config";
 import pkg from "../../../package.json" with { type: "json" };
+import { cloudFetch } from "../../core/cloud-auth";
 
 type CheckResult = ReturnType<typeof checkClaudeCode>;
 
@@ -322,8 +323,7 @@ async function collectCloud(opts: { offline: boolean }): Promise<CloudReport> {
     }
     if (report.reachable === "ok") {
       try {
-        const r = await fetch(`${state.remote}/v1/auth/devices`, {
-          headers: { Authorization: `Bearer ${state.device_token}` },
+        const r = await cloudFetch(state, `${state.remote}/v1/auth/devices`, {
           signal: AbortSignal.timeout(5000),
         });
         report.token_valid = r.ok ? "ok" : "fail";

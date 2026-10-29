@@ -91,7 +91,9 @@ test("POST /api/sync/pair: full pair flow via local viewer", async () => {
   const state = loadSyncState();
   expect(state).not.toBeNull();
   expect(state!.remote).toBe(cloudUrl);
-  expect(state!.device_token.length).toBeGreaterThan(20);
+  // sc-24117: viewer pairing pins an ed25519 device key — no bearer on disk.
+  expect(state!.key_alg).toBe("ed25519");
+  expect(state!.device_token).toBeUndefined();
 
   // /cloud now renders the paired view.
   const cloudPage = await fetch(`${viewerUrl}/cloud`);

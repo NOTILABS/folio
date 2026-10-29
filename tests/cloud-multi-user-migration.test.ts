@@ -350,7 +350,7 @@ test("authenticate() returns Device.isOperator from users.is_operator", async ()
   const { createPairingCode, consumePairingCode, authenticate } = await import("../src/cloud/auth");
   const { code } = createPairingCode("jarek");
   const { token } = consumePairingCode(code, "jarek-laptop", undefined);
-  const dev = authenticate(token);
+  const dev = authenticate(token!);
   expect(dev).not.toBeNull();
   expect(dev?.userId).toBe("jarek");
   expect(dev?.isOperator).toBe(true);

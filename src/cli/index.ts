@@ -281,6 +281,7 @@ export async function main(argv = process.argv): Promise<number> {
           remote: flagStr(flags.remote),
           code: flagStr(flags.code),
           name: flagStr(flags.name),
+          signer: flagStr(flags.signer),
           once: flagBool(flags.once),
           interval: flagInt(flags.interval),
           jsonOut: flagBool(flags.json),

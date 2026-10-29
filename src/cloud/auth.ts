@@ -25,7 +25,8 @@
 
 import { Database } from "bun:sqlite";
 import { cloudDb, nextSeq as _unusedNext } from "./db";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, createPublicKey, verify as cryptoVerify, type KeyObject } from "node:crypto";
+import { canonicalString, SIG_CONTEXT, type KeyAlg } from "../core/cloud-auth";
 
 // UUIDv7 generator — time-sortable, used for device.id and elsewhere across
 // the cloud-mvp work. RFC 9562. Format: 48 bits unix-ms timestamp, then 4 bits
@@ -104,7 +105,14 @@ export function createPairingCode(
 
 export interface ConsumePairingResult {
   deviceId: string;
-  token: string; // plaintext, return to caller, never persisted in plaintext
+  /** Plaintext bearer, returned once. Null when the device paired with a key (sc-24117). */
+  token: string | null;
+}
+
+/** sc-24117: public key a device pins at pair time (already verified by the caller). */
+export interface PairKey {
+  publicKeyPem: string;
+  alg: KeyAlg;
 }
 
 /**
@@ -128,7 +136,8 @@ export function consumePairingCode(
   code: string,
   deviceName: string,
   clientDeviceId?: string,
-  db: Database = cloudDb()
+  db: Database = cloudDb(),
+  key?: PairKey
 ): ConsumePairingResult {
   const row = db
     .query<{ code: string; expires_at: string; used_by_device_id: string | null; user_id: string }, [string]>(
@@ -143,6 +152,8 @@ export function consumePairingCode(
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     let deviceId: string;
+    const pin = (id: string) =>
+      db.run("UPDATE devices SET public_key = ?, key_alg = ? WHERE id = ?", [key?.publicKeyPem ?? null, key?.alg ?? null, id]);
     if (row.used_by_device_id) {
       // Re-pair through the SAME code: rotate token on the existing row.
       // user_id stays as it was at first pair — the code's user_id is
@@ -152,6 +163,7 @@ export function consumePairingCode(
         "UPDATE devices SET token_hash = ?, name = ?, paired_at = ?, revoked_at = NULL, user_id = ? WHERE id = ?",
         [tokenHash, deviceName, now, row.user_id, deviceId]
       );
+      pin(deviceId);
     } else {
       // Fresh code. Use the client-supplied device_id when present; otherwise
       // the cloud generates its own (legacy/missing-id path).
@@ -176,11 +188,14 @@ export function consumePairingCode(
         [deviceId, deviceName, tokenHash, now, row.user_id]
       );
       db.run("UPDATE pairing_codes SET used_by_device_id = ? WHERE code = ?", [deviceId, code]);
+      pin(deviceId);
     }
     return deviceId;
   });
   const deviceId = tx();
-  return { deviceId, token };
+  // With a pinned key the bearer we just hashed is never handed out, so it
+  // is dead on arrival — the device can only authenticate by signature.
+  return { deviceId, token: key ? null : token };
 }
 
 export interface Device {
@@ -326,3 +341,174 @@ export function isPublicPath(pathname: string): boolean {
   if (pathname === "/sw.js") return true;
   return false;
 }
+
+// ----- sc-24117: device-key request signing ("folio-sync-v1") -----
+
+/** Accepted clock skew between device and cloud, both directions. */
+export const SIG_MAX_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Parse + validate a public key for `alg`. Returns the normalized SPKI PEM
+ * or throws. Rejects RSA, other curves, and alg/key mismatches so a device
+ * cannot pin something the verifier would treat differently later.
+ */
+export function normalizePublicKey(pem: string, alg: string): { pem: string; alg: KeyAlg; key: KeyObject } {
+  if (alg !== "ed25519" && alg !== "p256") throw new Error("key_alg must be ed25519 or p256");
+  let key: KeyObject;
+  try {
+    key = createPublicKey(pem);
+  } catch {
+    throw new Error("public_key is not a valid SPKI PEM");
+  }
+  if (alg === "ed25519" && key.asymmetricKeyType !== "ed25519") throw new Error("public_key is not ed25519");
+  if (alg === "p256") {
+    if (key.asymmetricKeyType !== "ec" || key.asymmetricKeyDetails?.namedCurve !== "prime256v1") {
+      throw new Error("public_key is not P-256");
+    }
+  }
+  return { pem: key.export({ type: "spki", format: "pem" }) as string, alg, key };
+}
+
+/** Verify one signature over `payload`. P-256 accepts IEEE-P1363 (64 bytes, WebCrypto) and DER. */
+export function verifyPayload(key: KeyObject, alg: KeyAlg, payload: string, sigB64url: string): boolean {
+  let sig: Buffer;
+  try {
+    sig = Buffer.from(sigB64url, "base64url");
+  } catch {
+    return false;
+  }
+  if (sig.length === 0) return false;
+  const data = Buffer.from(payload, "utf8");
+  try {
+    if (alg === "ed25519") return cryptoVerify(null, data, key, sig);
+    const dsaEncoding = sig.length === 64 ? "ieee-p1363" : "der";
+    return cryptoVerify("sha256", data, { key, dsaEncoding }, sig);
+  } catch {
+    return false;
+  }
+}
+
+export interface SignedParts {
+  deviceId: string;
+  ts: string;
+  nonce: string;
+  sig: string;
+}
+
+/** Signature headers off a request, or null when it isn't a signed request. */
+export function extractSignature(req: Request): SignedParts | null {
+  const sig = req.headers.get("x-folio-sig");
+  if (!sig) return null;
+  return {
+    deviceId: req.headers.get("x-folio-device") ?? "",
+    ts: req.headers.get("x-folio-ts") ?? "",
+    nonce: req.headers.get("x-folio-nonce") ?? "",
+    sig,
+  };
+}
+
+/** Canonical string for a received request — must match the client's cloudAuthHeaders. */
+export function canonicalForRequest(req: Request, parts: SignedParts, body: Uint8Array): string {
+  const u = new URL(req.url);
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  return canonicalString(req.method, u.pathname + u.search, parts.ts, parts.nonce, bodyHash);
+}
+
+/** Freshness check shared by authenticateSigned and the pair / pin-key handlers. */
+export function signatureFresh(parts: SignedParts, now = Date.now()): boolean {
+  if (!/^\d{10,16}$/.test(parts.ts)) return false;
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(parts.nonce)) return false;
+  return Math.abs(now - Number(parts.ts)) <= SIG_MAX_SKEW_MS;
+}
+
+// Replay guard: a (device, nonce) pair is accepted once inside the skew
+// window. In-memory is enough — the cloud is a single process, and after a
+// restart the timestamp window bounds what could be replayed to 5 minutes
+// of requests already seen over TLS.
+const seenNonces = new Map<string, number>();
+function claimNonce(deviceId: string, nonce: string, now: number): boolean {
+  if (seenNonces.size > 50_000) {
+    for (const [k, exp] of seenNonces) if (exp < now) seenNonces.delete(k);
+  }
+  const k = `${deviceId}:${nonce}`;
+  const exp = seenNonces.get(k);
+  if (exp !== undefined && exp >= now) return false;
+  seenNonces.set(k, now + 2 * SIG_MAX_SKEW_MS);
+  return true;
+}
+
+/**
+ * Resolve a signed request to a device. Null when the device has no pinned
+ * key, is revoked, the timestamp is stale, the nonce was already used, or
+ * the signature doesn't verify. Same last_seen_at throttle as authenticate().
+ */
+export function authenticateSigned(req: Request, parts: SignedParts, body: Uint8Array, db: Database = cloudDb()): Device | null {
+  const now = Date.now();
+  if (!parts.deviceId || !signatureFresh(parts, now)) return null;
+  const row = db
+    .query<
+      {
+        id: string; name: string; user_id: string; paired_at: string; last_seen_at: string | null;
+        revoked_at: string | null; is_operator: number | null; public_key: string | null; key_alg: string | null;
+      },
+      [string]
+    >(
+      `SELECT d.id, d.name, d.user_id, d.paired_at, d.last_seen_at, d.revoked_at, u.is_operator,
+              d.public_key, d.key_alg
+         FROM devices d LEFT JOIN users u ON u.id = d.user_id
+        WHERE d.id = ?`
+    )
+    .get(parts.deviceId);
+  if (!row || row.revoked_at || !row.public_key || !row.key_alg) return null;
+  let key: KeyObject;
+  try {
+    key = createPublicKey(row.public_key);
+  } catch {
+    return null;
+  }
+  if (!verifyPayload(key, row.key_alg as KeyAlg, canonicalForRequest(req, parts, body), parts.sig)) return null;
+  if (!claimNonce(row.id, parts.nonce, now)) return null;
+  const lastSeen = row.last_seen_at ? new Date(row.last_seen_at).getTime() : 0;
+  if (now - lastSeen > 60_000) {
+    db.run("UPDATE devices SET last_seen_at = ? WHERE id = ?", [new Date(now).toISOString(), row.id]);
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    userId: row.user_id,
+    isOperator: row.is_operator === 1,
+    pairedAt: row.paired_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+/**
+ * Proof of possession for pair / pin-key: the request must be signed with
+ * the key being pinned, as `deviceId` (null = don't check the header: on
+ * pin-key the bearer already identifies the device, and a legacy client may
+ * not know the cloud-side id). Throws with a short reason.
+ */
+export function verifyProofOfPossession(req: Request, body: Uint8Array, deviceId: string | null, key: KeyObject, alg: KeyAlg): void {
+  const parts = extractSignature(req);
+  if (!parts) throw new Error("request must be signed with the key being pinned");
+  if (deviceId !== null && parts.deviceId !== deviceId) throw new Error("x-folio-device does not match device_id");
+  if (!signatureFresh(parts)) throw new Error("signature timestamp out of window");
+  if (!verifyPayload(key, alg, canonicalForRequest(req, parts, body), parts.sig)) throw new Error("signature does not verify");
+  if (!claimNonce(deviceId ?? parts.deviceId, parts.nonce, Date.now())) throw new Error("nonce already used");
+}
+
+/**
+ * Pin a public key on an existing device and kill its bearer: token_hash
+ * is overwritten with the hash of a token nobody ever sees. From here on
+ * the device authenticates only by signature (sc-24117).
+ */
+export function pinDeviceKey(deviceId: string, publicKeyPem: string, alg: KeyAlg, db: Database = cloudDb()): void {
+  db.run("UPDATE devices SET public_key = ?, key_alg = ?, token_hash = ? WHERE id = ? AND revoked_at IS NULL", [
+    publicKeyPem,
+    alg,
+    hashToken(generateToken()),
+    deviceId,
+  ]);
+}
+
+export { SIG_CONTEXT };
