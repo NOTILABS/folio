@@ -2,6 +2,24 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.45.0 — 2026-10-28
+
+**Added — publish-only cloud sync: `sync_scope: "shared"` (sc-24117, #114).** Until now a paired device mirrored every note to the cloud, although only a small part of them was ever shared. In the new mode only snapshots of notes, threads and sets covered by an active share reach the cloud; revoking or expiring a share deletes its snapshot there. The default stays `all` (full mirror, no behaviour change) — switching a device is a config change.
+
+**Changed — the Folio skill no longer suggests links without expiry for living documents (sc-24117, #115).** `publish` for a living doc keeps the default 7-day expiry; `expires_in_days: 0` only when the user explicitly asks for a link that never expires.
+
+### Added
+
+- **Config `sync_scope`** (`"all"` | `"shared"`, env override `FOLIO_SYNC_SCOPE`); shown by `folio doctor` in the cloud section.
+- **`shared` mode sync**: reads `GET /v1/shares` (a failure aborts the sync and deletes nothing) and pushes only each share's coverage — note + its forward `replace` chain; every active note of a shared thread (a new note in a shared thread joins on the next sync); set root + linked notes. No pull: the box is the source of truth. Notes that drop out of coverage are sent as `deletes`.
+- **`publish`** (MCP, CLI and viewer "Share") in `shared` mode pushes the scope snapshot before `POST /v1/share`; **revoke** (CLI and viewer) purges the snapshot right away instead of waiting for the next sync tick.
+
+### Changed
+
+- **Cloud `/p/<token>/n/<uuid>` and `/p/<token>/raw/<uuid>`**: an old link to a note that was later `replace`d renders the head of the chain in place (no redirect). Link format unchanged.
+- Default share expiry (7 days) moved to one constant `DEFAULT_SHARE_EXPIRES_DAYS` used by cloud, CLI, MCP and viewer; value unchanged, explicit `0` still means no expiry.
+- **Skill (SKILL.md)**: living documents are published with the default expiry, see above.
+
 ## v0.44.2 — 2026-10-21
 
 **CI-only release.** No change to the binary or its behaviour versus v0.44.1; this release exists so the new Release workflow setting is exercised end to end.
