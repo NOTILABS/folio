@@ -131,21 +131,41 @@ function tokenFingerprint(token: string): string {
  * After it the cloud refuses the old token and .sync-state.json holds no
  * credential at all (the private key is in ~/Folio/.device-key.pem, 0600,
  * or stays inside the NotiBox gate with --signer).
+ *
+ * Takes the sync lock like `folio sync` and publish do: a running daemon
+ * holds the state it loaded at start and saves it after every iteration, so
+ * pinning under it would leave it on a dead bearer (401 until restart) or
+ * have its next save restore the revoked token over the pinned key.
  */
 async function pinKeyCmd(opts: SyncOpts): Promise<number> {
-  const state = loadSyncState();
-  if (!state) { err(c.err("✗ Not paired. Run: folio sync pair --remote <url> --code <6-digit>\n")); return 2; }
-  if (state.key_alg) { out(c.dim(`Already on a device key (${state.key_alg}) — nothing to do.`)); return 0; }
-  const localDev = getOrCreateDeviceId();
   try {
-    await pinKey(state, localDev.id, opts.signer ?? defaultSignerUrl());
+    acquireLock();
   } catch (e: any) {
-    err(c.err(`✗ ${e?.message ?? e}\n`));
-    return 3;
+    if (e instanceof LockHeldError) {
+      err(c.err(`✗ ${e.message}\n`));
+      err(c.dim("  Stop it first (e.g. `systemctl --user stop folio-sync`), run `folio sync pin-key`, then start it again.\n"));
+      return 3;
+    }
+    throw e;
   }
-  saveSyncState(state);
-  out(c.ok("✓") + ` Device key pinned on ${c.cyan(state.remote)} (${state.key_alg}); bearer token revoked and removed from .sync-state.json`);
-  return 0;
+  try {
+    // Load under the lock, so the state we rewrite is the latest one on disk.
+    const state = loadSyncState();
+    if (!state) { err(c.err("✗ Not paired. Run: folio sync pair --remote <url> --code <6-digit>\n")); return 2; }
+    if (state.key_alg) { out(c.dim(`Already on a device key (${state.key_alg}) — nothing to do.`)); return 0; }
+    const localDev = getOrCreateDeviceId();
+    try {
+      await pinKey(state, localDev.id, opts.signer ?? defaultSignerUrl());
+    } catch (e: any) {
+      err(c.err(`✗ ${e?.message ?? e}\n`));
+      return 3;
+    }
+    saveSyncState(state);
+    out(c.ok("✓") + ` Device key pinned on ${c.cyan(state.remote)} (${state.key_alg}); bearer token revoked and removed from .sync-state.json`);
+    return 0;
+  } finally {
+    releaseLock();
+  }
 }
 
 async function statusCmd(opts: SyncOpts): Promise<number> {

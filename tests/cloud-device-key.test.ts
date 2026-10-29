@@ -2,7 +2,7 @@
 // signed requests, bearer death after pin, replay/skew/tamper rejection,
 // P-256 (NotiBox gate) via a remote signer, and the bearer → key upgrade.
 import { expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { generateKeyPairSync, sign as cryptoSign, createHash } from "node:crypto";
@@ -170,6 +170,33 @@ test("pin-key: bearer device upgrades, bearer dies, state has no token", async (
   expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(200);
   const old = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
   expect(old.status).toBe(401);
+});
+
+test("pin-key refuses while folio sync holds the lock; state and bearer untouched", async () => {
+  const { consumePairingCode } = await import("../src/cloud/auth");
+  const { saveSyncState, loadSyncState, acquireLock, releaseLock } = await import("../src/core/sync");
+  const { syncCmd } = await import("../src/cli/commands/sync");
+  const { token } = consumePairingCode(await code(), "old-mac", "dev-old");
+  saveSyncState({ remote: baseUrl, device_id: "dev-old", device_token: token, last_pulled_seq: 0, last_pushed_at: null, last_live_pushed: {} } as any);
+
+  acquireLock(); // a running daemon (live pid) holds the lock
+  try {
+    expect(await syncCmd({ sub: "pin-key" })).toBe(3);
+  } finally {
+    releaseLock();
+  }
+  const st: any = loadSyncState();
+  expect(st.device_token).toBe(token);
+  expect(st.key_alg).toBeUndefined();
+  const still = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
+  expect(still.status).toBe(200);
+
+  // Daemon stopped → pin-key goes through and leaves no lock behind.
+  expect(await syncCmd({ sub: "pin-key" })).toBe(0);
+  const pinned: any = loadSyncState();
+  expect(pinned.key_alg).toBe("ed25519");
+  expect(pinned.device_token).toBeUndefined();
+  expect(existsSync(join(folioHome, ".sync.lock"))).toBe(false);
 });
 
 test("pin-key without proof of possession is refused and bearer survives", async () => {
