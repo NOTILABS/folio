@@ -71,6 +71,34 @@ export interface CreatePairingCodeResult {
   code: string;
   expiresAt: string; // ISO 8601
   userId: string;    // which account the new device will join (v0.13+)
+  /** sc-24117: sha256 hex of the SPKI DER the code is bound to, when bound. */
+  boundKeyFp?: string;
+}
+
+/**
+ * sc-24117 PR C — normalize a key a pair-code is bound to. Input is base64
+ * SPKI DER (the form backplane keeps in devices.box_identity_key) or SPKI
+ * PEM. Only keys a device could pin are accepted (P-256, ed25519). Returns
+ * canonical base64 SPKI DER, the value compared at pair time.
+ */
+export function normalizeExpectedKey(input: string): string {
+  const raw = String(input ?? "").trim();
+  if (!raw) throw new Error("expected key is empty");
+  let key: KeyObject;
+  try {
+    key = raw.includes("BEGIN PUBLIC KEY")
+      ? createPublicKey(raw)
+      : createPublicKey({ key: Buffer.from(raw, "base64"), format: "der", type: "spki" });
+  } catch {
+    throw new Error("expected key is not a valid SPKI public key (base64 DER or PEM)");
+  }
+  const okEc = key.asymmetricKeyType === "ec" && key.asymmetricKeyDetails?.namedCurve === "prime256v1";
+  if (!okEc && key.asymmetricKeyType !== "ed25519") throw new Error("expected key must be P-256 or ed25519");
+  return (key.export({ type: "spki", format: "der" }) as Buffer).toString("base64");
+}
+
+function spkiDerB64(pem: string): string {
+  return (createPublicKey(pem).export({ type: "spki", format: "der" }) as Buffer).toString("base64");
 }
 
 /**
@@ -84,8 +112,10 @@ export interface CreatePairingCodeResult {
  */
 export function createPairingCode(
   userId: string = "default",
-  db: Database = cloudDb()
+  db: Database = cloudDb(),
+  expectedKey?: string
 ): CreatePairingCodeResult {
+  const bound = expectedKey ? normalizeExpectedKey(expectedKey) : null;
   // Clean up expired codes opportunistically — cheap, prevents indefinite growth.
   db.run("DELETE FROM pairing_codes WHERE expires_at < ?", [new Date().toISOString()]);
   // Retry once on the astronomically unlikely PK collision.
@@ -93,8 +123,15 @@ export function createPairingCode(
     const code = generatePairingCode();
     const expiresAt = new Date(Date.now() + PAIRING_TTL_MS).toISOString();
     try {
-      db.run("INSERT INTO pairing_codes (code, expires_at, user_id) VALUES (?, ?, ?)", [code, expiresAt, userId]);
-      return { code, expiresAt, userId };
+      db.run("INSERT INTO pairing_codes (code, expires_at, user_id, expected_key) VALUES (?, ?, ?, ?)", [
+        code,
+        expiresAt,
+        userId,
+        bound,
+      ]);
+      return bound
+        ? { code, expiresAt, userId, boundKeyFp: createHash("sha256").update(Buffer.from(bound, "base64")).digest("hex") }
+        : { code, expiresAt, userId };
     } catch (e: any) {
       if (!/UNIQUE constraint/i.test(e?.message ?? "")) throw e;
       // collision: retry
@@ -140,12 +177,20 @@ export function consumePairingCode(
   key?: PairKey
 ): ConsumePairingResult {
   const row = db
-    .query<{ code: string; expires_at: string; used_by_device_id: string | null; user_id: string }, [string]>(
-      "SELECT code, expires_at, used_by_device_id, user_id FROM pairing_codes WHERE code = ?"
-    )
+    .query<
+      { code: string; expires_at: string; used_by_device_id: string | null; user_id: string; expected_key: string | null },
+      [string]
+    >("SELECT code, expires_at, used_by_device_id, user_id, expected_key FROM pairing_codes WHERE code = ?")
     .get(code);
   if (!row) throw new Error("invalid pairing code");
   if (new Date(row.expires_at).getTime() < Date.now()) throw new Error("pairing code expired");
+  // sc-24117 PR C: a code bound to a key (NotiBox box identity pinned in
+  // backplane) pairs only that key — no bearer, no other key. The caller has
+  // already checked proof of possession, so a match means the device holds it.
+  if (row.expected_key) {
+    if (!key) throw new Error("pairing code requires a device key");
+    if (spkiDerB64(key.publicKeyPem) !== row.expected_key) throw new Error("device key does not match the key this pairing code is bound to");
+  }
 
   const token = generateToken();
   const tokenHash = hashToken(token);

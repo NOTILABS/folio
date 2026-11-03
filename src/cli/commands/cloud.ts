@@ -8,9 +8,11 @@
  *   init        Idempotent first-run setup of data dir + DB schema.
  *   serve       Long-running process. Env: FOLIO_CLOUD_HOME / _PORT / _HOST
  *               / _PUBLIC_URL. Runs until SIGTERM/SIGINT.
- *   pair-code [--user <id>]
+ *   pair-code [--user <id>] [--expect-key <base64 SPKI DER|PEM>]
  *               Mint a 6-digit code (10-min TTL). --user required when more
- *               than one user exists in the cloud.
+ *               than one user exists in the cloud. --expect-key binds the
+ *               code to one public key (sc-24117: NotiBox box identity from
+ *               backplane); pairing with any other key or a bearer fails.
  *   user-add <id> [--display "Name"]
  *               Provision a new user account (no auth state; auth lives on
  *               devices). Operator hands a pair-code over a side channel.
@@ -146,11 +148,29 @@ function cloudPairCode(args: string[]): number {
     userId = users[0] ?? "default";
   }
 
-  const { code, expiresAt } = createPairingCode(userId);
+  let expectKey: string | undefined;
+  if (flags["expect-key"] !== undefined) {
+    if (typeof flags["expect-key"] !== "string") {
+      err(c.err("✗ --expect-key needs a value (base64 SPKI DER or PEM)\n"));
+      return 5;
+    }
+    expectKey = flags["expect-key"];
+  }
+  let res: ReturnType<typeof createPairingCode>;
+  try {
+    res = createPairingCode(userId, undefined, expectKey);
+  } catch (e: any) {
+    err(c.err(`✗ ${e?.message ?? e}\n`));
+    return 5;
+  }
+  const { code, expiresAt, boundKeyFp } = res;
   out("");
   out(`  Pairing code: ${c.bold(c.cyan(code))}`);
   out(`  User:         ${c.bold(userId)}`);
   out(`  Expires:      ${c.dim(expiresAt)}`);
+  // Machine-read by backplane /api/folio/pair-code: the line proves this
+  // cloud enforced the binding (an older folio ignores the flag silently).
+  if (boundKeyFp) out(`  Bound key:    sha256:${boundKeyFp}`);
   out("");
   out(c.dim("  Use within 10 minutes:"));
   out(c.dim(`    curl -X POST $CLOUD/v1/auth/pair \\`));

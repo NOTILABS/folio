@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
   code TEXT PRIMARY KEY,         -- 6-digit string, zero-padded
   expires_at TEXT NOT NULL,      -- ISO 8601
   used_by_device_id TEXT,        -- null until claimed; set when device pairs
-  user_id TEXT NOT NULL DEFAULT 'default'
+  user_id TEXT NOT NULL DEFAULT 'default',
+  expected_key TEXT              -- sc-24117: base64 SPKI DER the pairing device must present (NotiBox box identity); NULL = any key or bearer
 );
 CREATE INDEX IF NOT EXISTS pairing_codes_by_exp ON pairing_codes(expires_at);
 
@@ -437,6 +438,11 @@ function ensureMultiUserSchema(db: Database): void {
     const cols = db.query<{ name: string }, []>("PRAGMA table_info(devices)").all();
     if (!cols.some((c) => c.name === "public_key")) db.exec("ALTER TABLE devices ADD COLUMN public_key TEXT");
     if (!cols.some((c) => c.name === "key_alg")) db.exec("ALTER TABLE devices ADD COLUMN key_alg TEXT");
+    // sc-24117 PR C: pair-code bound to a key pinned elsewhere (backplane
+    // devices.box_identity_key), so a stolen 6-digit code cannot pair a
+    // foreign key into a box's account.
+    const pcCols = db.query<{ name: string }, []>("PRAGMA table_info(pairing_codes)").all();
+    if (!pcCols.some((c) => c.name === "expected_key")) db.exec("ALTER TABLE pairing_codes ADD COLUMN expected_key TEXT");
   }
 
   // v0.17: notes.inline_render. ALWAYS runs (outside the UNIQUE-rebuild
