@@ -2,6 +2,19 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.47.0 — 2026-11-03
+
+**Added — pairing codes bound to one device key (sc-24117, #119).** A 6-digit pairing code can now be tied to a single public key, so a leaked code cannot pair a foreign key into someone's account. NotiBox uses this to pair a box only with the identity key pinned for it in backplane (`devices.box_identity_key`).
+
+### Added
+
+- **`folio cloud pair-code --expect-key <base64 SPKI DER|PEM>`** binds the code to one P-256 or ed25519 public key. `/v1/auth/pair` with such a code accepts only that key (after proof of possession) and rejects any other key or a bearer pairing; a rejected attempt does not consume the code. The output prints `Bound key: sha256:<hex>` so the caller can tell the cloud enforced the binding (an older cloud ignores the flag).
+- Cloud schema: `pairing_codes.expected_key` (idempotent `ALTER`).
+
+### Unchanged
+
+- Codes minted without `--expect-key` pair exactly as before (any key or bearer).
+
 ## v0.46.0 — 2026-11-03
 
 **Added — device-key authentication for cloud sync (sc-24117, #117).** A paired device no longer has to keep a long-lived bearer token in `~/Folio/.sync-state.json` (the token that travelled in a golden image). Requests are signed with a per-device key and the cloud stores only the public half.
