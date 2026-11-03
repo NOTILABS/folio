@@ -2,9 +2,9 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
-## Unreleased
+## v0.46.0 — 2026-11-03
 
-**Added — device-key authentication for cloud sync (sc-24117, PR B).** A paired device no longer has to keep a long-lived bearer token in `~/Folio/.sync-state.json` (the token that travelled in a golden image). Requests are signed with a per-device key and the cloud stores only the public half.
+**Added — device-key authentication for cloud sync (sc-24117, #117).** A paired device no longer has to keep a long-lived bearer token in `~/Folio/.sync-state.json` (the token that travelled in a golden image). Requests are signed with a per-device key and the cloud stores only the public half.
 
 ### Added
 
