@@ -45,7 +45,7 @@ test("cloud /raw body injects the link interceptor", () => {
 test("cloud capability page prefixes the token so links stay in-scope", () => {
   const html = renderSharedNotePage("TOK123", "uuid1", "Title");
   expect(html).toContain("'navigate'");
-  expect(html).toContain("'/p/' + TOKEN + href");
+  expect(html).toContain("SCOPE + href");
   expect(html).toContain('"TOK123"');
 });
 
@@ -53,4 +53,49 @@ test("cloud PWA shell navigates root-relative on a navigate message", () => {
   const html = renderNotePage("uuid1", "Title");
   expect(html).toContain("'navigate'");
   expect(html).toContain("window.location.assign(href)");
+});
+
+// Behavioural: run the capability page's relay script against a stub window
+// and check where a navigate message actually sends the top window.
+function relayTargets(token: string, hrefs: string[]): (string | null)[] {
+  const html = renderSharedNotePage(token, "uuid1", "Title");
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+  let handler: ((e: any) => void) | null = null;
+  let assigned: string | null = null;
+  const win = {
+    addEventListener: (type: string, fn: (e: any) => void) => { if (type === "message") handler = fn; },
+    location: { assign: (u: string) => { assigned = u; } },
+  };
+  new Function("window", "fetch", script)(win, () => Promise.resolve());
+  return hrefs.map((href) => {
+    assigned = null;
+    handler!({ data: { ns: "folio", type: "navigate", href } });
+    return assigned;
+  });
+}
+
+test("relay prefixes the token for bare internal links", () => {
+  expect(relayTargets("TOK123", ["/n/abc", "/t/thr", "/t/thr/asset/a.pdf?dl=1"])).toEqual([
+    "/p/TOK123/n/abc",
+    "/p/TOK123/t/thr",
+    "/p/TOK123/t/thr/asset/a.pdf?dl=1",
+  ]);
+});
+
+test("relay does not double-prefix links the /raw route already scoped (asset downloads)", () => {
+  expect(relayTargets("TOK123", ["/p/TOK123/t/thr/asset/plan.pdf", "/p/TOK123/n/abc"])).toEqual([
+    "/p/TOK123/t/thr/asset/plan.pdf",
+    "/p/TOK123/n/abc",
+  ]);
+});
+
+test("relay still scopes /p/ links that belong to another token", () => {
+  expect(relayTargets("TOK123", ["/p/OTHER/n/abc", "/p/TOK1234/n/abc"])).toEqual([
+    "/p/TOK123/p/OTHER/n/abc",
+    "/p/TOK123/p/TOK1234/n/abc",
+  ]);
+});
+
+test("relay ignores external and non-folio links", () => {
+  expect(relayTargets("TOK123", ["https://example.com", "//evil.example/n/x", "/admin"])).toEqual([null, null, null]);
 });
