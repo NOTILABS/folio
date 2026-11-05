@@ -99,3 +99,55 @@ test("relay still scopes /p/ links that belong to another token", () => {
 test("relay ignores external and non-folio links", () => {
   expect(relayTargets("TOK123", ["https://example.com", "//evil.example/n/x", "/admin"])).toEqual([null, null, null]);
 });
+
+// Behavioural: run the /raw body's click interceptor against a stub document.
+function clickRaw(href: string, attrs: Record<string, string> = {}) {
+  const html = renderStandaloneNote({ theme: "linen", title: "x", bodyHtml: "<p>x</p>" } as any);
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+  const script = scripts.find((s) => s.includes("closest('a[href]')"))!;
+  let handler: ((e: any) => void) | null = null;
+  const doc = { addEventListener: (type: string, fn: (e: any) => void) => { if (type === "click") handler = fn; } };
+  const posted: any[] = [];
+  const parent = { postMessage: (m: any) => posted.push(m) };
+  new Function("document", "parent", script)(doc, parent);
+  const a = {
+    attrs: { href, ...attrs } as Record<string, string>,
+    getAttribute(n: string) { return this.attrs[n] ?? null; },
+    setAttribute(n: string, v: string) { this.attrs[n] = v; },
+  };
+  let prevented = false;
+  handler!({
+    defaultPrevented: false, button: 0,
+    target: { closest: () => a },
+    preventDefault: () => { prevented = true; },
+  });
+  return { attrs: a.attrs, prevented, posted };
+}
+
+test("/raw interceptor opens external links in a new tab instead of the sandboxed frame", () => {
+  for (const href of ["https://cs50.harvard.edu/python/", "http://example.com", "//example.com/x"]) {
+    const r = clickRaw(href);
+    expect(r.attrs.target).toBe("_blank");
+    expect(r.attrs.rel).toBe("noreferrer noopener");
+    expect(r.prevented).toBe(false); // browser default action does the opening
+    expect(r.posted).toEqual([]);
+  }
+});
+
+test("/raw interceptor keeps an explicit target on external links", () => {
+  const r = clickRaw("https://example.com", { target: "_top" });
+  expect(r.attrs.target).toBe("_top");
+});
+
+test("/raw interceptor still relays internal links and leaves anchors alone", () => {
+  const internal = clickRaw("/n/abc");
+  expect(internal.prevented).toBe(true);
+  expect(internal.posted).toEqual([{ ns: "folio", type: "navigate", href: "/n/abc" }]);
+  expect(internal.attrs.target).toBeUndefined();
+  for (const href of ["#sekcja", "mailto:a@b.pl", "/admin"]) {
+    const r = clickRaw(href);
+    expect(r.prevented).toBe(false);
+    expect(r.posted).toEqual([]);
+    expect(r.attrs.target).toBeUndefined();
+  }
+});

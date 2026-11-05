@@ -93,7 +93,18 @@ ${body}
       var t = e.target, a = t && t.closest ? t.closest('a[href]') : null;
       if (!a) return;
       var href = a.getAttribute('href') || '';
-      if (href.charAt(0) !== '/' || href.charAt(1) === '/') return;
+      // External links: the iframe is sandboxed and most sites refuse to be
+      // framed ("refused to connect"), so open them in a new tab instead —
+      // same as the local viewer's attachExternalLinks. Set at click time so
+      // the browser's default action picks it up; explicit targets win.
+      if (/^(https?:)?\\/\\//i.test(href)) {
+        if (!a.getAttribute('target')) {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noreferrer noopener');
+        }
+        return;
+      }
+      if (href.charAt(0) !== '/') return;
       if (!/^\\/(n|p|t|tag|threads)(\\/|\$|[?#])/.test(href)) return;
       e.preventDefault();
       try { parent.postMessage({ ns: 'folio', type: 'navigate', href: href }, '*'); } catch(_){}
