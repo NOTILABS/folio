@@ -218,7 +218,15 @@ export function renderSharedNotePage(token: string, uuid: string, title: string,
       if (d.type === 'navigate') {
         var href = String(d.href || '');
         if (!/^\\/(n|p|t|tag|threads)(\\/|\$|[?#])/.test(href)) return;
-        window.location.assign('/p/' + TOKEN + href);
+        // Asset links arrive already scoped: the /raw route rewrites
+        // /t/X/asset/f to /p/<token>/t/X/asset/f. Prefixing again would
+        // yield /p/<token>/p/<token>/… → 404 (e.g. "Download PDF" buttons).
+        var SCOPE = '/p/' + TOKEN;
+        if (href === SCOPE || href.indexOf(SCOPE + '/') === 0 || href.indexOf(SCOPE + '?') === 0 || href.indexOf(SCOPE + '#') === 0) {
+          window.location.assign(href);
+        } else {
+          window.location.assign(SCOPE + href);
+        }
         return;
       }
       // v0.34: recipient picked a variant in the body. POST it to the cloud
