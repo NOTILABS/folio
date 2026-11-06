@@ -2,6 +2,19 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.48.0 — 2026-11-06
+
+**Fixed — shared notes (`/p/<token>/n/<id>`): asset links and external links.** Two click bugs in the cloud share view.
+
+### Fixed
+
+- **Asset links no longer 404 (sc-30214, #121).** Clicking an `<a>` that points at a note asset (e.g. a "Download PDF" button) produced `/p/<token>/p/<token>/t/…`: `/raw` already rewrites asset hrefs to `/p/<token>/…`, and the navigation relay prefixed the token again. The relay now passes hrefs that already start with `/p/<same-token>` unchanged; everything else, including `/p/<other-token>`, is handled as before. Images (`src`) were never affected.
+- **External links open in a new tab (sc-30237, #122).** The note body lives in a sandboxed iframe, so an external link without `target` loaded inside the frame and most sites refused to be framed ("refused to connect"). The click interceptor on `/raw` now adds `target="_blank"` and `rel="noreferrer noopener"` to `http(s)://` and `//…` links at click time. An explicit `target` set by the author wins; internal links (`/n`, `/p`, `/t`…), `#…` anchors and `mailto:` are unchanged.
+
+### Unchanged
+
+- The new tab inherits the iframe sandbox (no `allow-popups-to-escape-sandbox`), so sign-in flows on the opened site may not work there. Deliberately out of scope.
+
 ## v0.47.0 — 2026-11-03
 
 **Added — pairing codes bound to one device key (sc-24117, #119).** A 6-digit pairing code can now be tied to a single public key, so a leaked code cannot pair a foreign key into someone's account. NotiBox uses this to pair a box only with the identity key pinned for it in backplane (`devices.box_identity_key`).
