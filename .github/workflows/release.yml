@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: darwin-arm64
             bun_target: ''
           - os: ubuntu-latest
