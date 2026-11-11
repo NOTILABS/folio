@@ -658,23 +658,6 @@ export async function startServer(): Promise<ReturnType<typeof Bun.serve>> {
           return jsonResp({ ok: true, device_id: out.device_id });
         }
 
-        // POST /api/sync/pair-code — already paired? ask the cloud for a new
-        // pairing code so another device can onboard without SSH.
-        if (req.method === "POST" && path === "/api/sync/pair-code") {
-          const { loadSyncState } = await import("../core/sync");
-          const state = loadSyncState();
-          if (!state) return jsonResp({ error: "not paired" }, 400);
-          const res = await cloudFetch(state, `${state.remote}/v1/auth/pair-code`, {
-            method: "POST",
-          });
-          if (!res.ok) {
-            let detail = ""; try { detail = await res.text(); } catch {}
-            return jsonResp({ error: `pair-code failed: HTTP ${res.status} ${detail.slice(0, 200)}` }, 502);
-          }
-          const body = await res.json();
-          return jsonResp(body);
-        }
-
         // GET /api/cloud/stats — proxy to cloud /v1/admin/stats with the
         // device bearer token from local sync state. Keeps the token out of
         // page JS — only the local viewer process holds it.

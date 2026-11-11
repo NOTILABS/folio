@@ -1,5 +1,5 @@
 /**
- * Sync surface — push/pull payload shapes + handlers, plus asset upload.
+ * Sync surface — push payload shapes + handler, plus asset upload.
  *
  * Push response includes a rename map: if a note's (thread_id, slug) collided
  * with an existing row, the server saves it under `<slug>-<uuid6>.html` shape
@@ -7,9 +7,8 @@
  * the canonical slug so the client renames locally. URL `/n/<uuid>` is
  * stable regardless of rename, because uuid is the cross-device identity.
  *
- * Pull returns a delta keyed by `server_seq`. Both notes and live_entries
- * draw from the same monotonic counter (see db.ts nextSeq), so one cursor
- * suffices for the union.
+ * There is no pull (sc-24120): the cloud is a one-way publish relay. Boxes
+ * push the snapshot of what they publish; capability URLs serve it.
  */
 
 import { Database } from "bun:sqlite";
@@ -17,7 +16,6 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { cloudDb, cloudAssetsDir, nextSeq } from "./db";
-import { publish as publishLiveEntry } from "./sse-hub";
 import type { Device } from "./auth";
 
 export interface PushNote {
@@ -78,69 +76,6 @@ export interface PushAccepted {
    *  storage being reclaimed; not part of cursor advance. */
   assets_deleted: number;
   cursor: number;
-}
-
-export interface PullPayload {
-  notes: PullNote[];
-  live_entries: PullLiveEntry[];
-  tombstones: PullTombstone[];
-  assets: PullAsset[];
-  cursor: number;
-}
-
-export interface PullTombstone {
-  uuid: string;
-  thread_id: string;
-  origin_device_id: string | null;
-  deleted_at: string;
-  server_seq: number;
-}
-
-export interface PullNote {
-  uuid: string;
-  slug: string;
-  thread_id: string;
-  title: string;
-  type: string;
-  theme: string;
-  theme_profile: string;
-  body_html: string;
-  plain_text: string;
-  created_at: string;
-  updated_at: string;
-  expires_at: string | null;
-  is_final: 0 | 1;
-  live: 0 | 1;
-  owner_device_id: string | null;
-  origin_device_id: string;
-  inline_render: 0 | 1;
-  is_pinned: 0 | 1;
-  pinned_at: string | null;
-  tags: string[];
-  summary: string | null;
-  word_count: number;
-  server_seq: number;
-}
-
-export interface PullLiveEntry {
-  id: string;
-  note_uuid: string;
-  ts: string;
-  content_html: string;
-  tags: string[];
-  occurred_at: string | null;
-  refs: string[];
-  importance: number | null;
-  source_ref: string | null;
-  server_seq: number;
-}
-
-export interface PullAsset {
-  hash: string;
-  filename: string;
-  thread_id: string;
-  content_type: string;
-  size_bytes: number;
 }
 
 function resolveSlug(db: Database, userId: string, threadId: string, desiredSlug: string, uuid: string): string {
@@ -276,19 +211,6 @@ export function handlePush(payload: PushPayload, device: Device, db: Database = 
       );
       accepted.live_entries.push({ id: e.id, note_uuid: e.note_uuid });
       accepted.cursor = Math.max(accepted.cursor, seq);
-      // Fan out to any /v1/sync/live-stream subscribers on this note.
-      // No-op if nobody's listening, so safe to call unconditionally.
-      publishLiveEntry(e.note_uuid, {
-        id: e.id,
-        note_uuid: e.note_uuid,
-        ts: e.ts,
-        content_html: e.content_html,
-        tags: e.tags ?? [],
-        occurred_at: e.occurred_at ?? null,
-        refs: e.refs ?? [],
-        importance: e.importance ?? null,
-        source_ref: e.source_ref ?? null,
-      });
     }
     // Deletes are processed last so they don't fight with concurrent pushes
     // of the same uuid (idempotent push then delete = empty after).
@@ -354,182 +276,6 @@ export function handlePush(payload: PushPayload, device: Device, db: Database = 
   });
   tx();
   return accepted;
-}
-
-export function handlePull(since: number, device: Device, db: Database = cloudDb()): PullPayload {
-  const userId = device.userId;
-  const notes = db
-    .query<
-      {
-        uuid: string;
-        slug: string;
-        thread_id: string;
-        title: string;
-        type: string;
-        theme: string;
-        theme_profile: string;
-        body_html: string;
-        plain_text: string;
-        created_at: string;
-        updated_at: string;
-        expires_at: string | null;
-        is_final: number;
-        live: number;
-        owner_device_id: string | null;
-        origin_device_id: string;
-        inline_render: number;
-        is_pinned: number;
-        pinned_at: string | null;
-        superseded_by: string | null;
-        word_count: number;
-        summary: string | null;
-        server_seq: number;
-      },
-      [string, number]
-    >(
-      `SELECT uuid, slug, thread_id, title, type, theme, theme_profile,
-              body_html, plain_text, created_at, updated_at, expires_at,
-              is_final, live, owner_device_id, origin_device_id, inline_render,
-              is_pinned, pinned_at, superseded_by,
-              word_count, summary, server_seq
-         FROM notes WHERE user_id = ? AND server_seq > ? ORDER BY server_seq ASC`
-    )
-    .all(userId, since);
-
-  // Live entries: scope via parent-note's user_id (entries don't carry their
-  // own user_id, only inherited from notes). Sub-select keeps the cursor
-  // semantics intact across the union.
-  const entries = db
-    .query<
-      {
-        id: string;
-        note_uuid: string;
-        ts: string;
-        content_html: string;
-        tags_json: string;
-        occurred_at: string | null;
-        refs_json: string;
-        importance: number | null;
-        source_ref: string | null;
-        server_seq: number;
-      },
-      [number, string]
-    >(
-      `SELECT le.id, le.note_uuid, le.ts, le.content_html, le.tags_json, le.occurred_at,
-              le.refs_json, le.importance, le.source_ref, le.server_seq
-         FROM live_entries le
-         INNER JOIN notes n ON n.uuid = le.note_uuid
-        WHERE le.server_seq > ? AND n.user_id = ?
-        ORDER BY le.server_seq ASC`
-    )
-    .all(since, userId);
-
-  // Assets referenced by the notes in this delta — let the client decide
-  // whether to fetch bytes (HEAD/GET /v1/sync/assets/:hash). Scoped to user.
-  const threadIds = Array.from(new Set(notes.map((n) => n.thread_id)));
-  const assets: PullAsset[] = [];
-  if (threadIds.length > 0) {
-    const placeholders = threadIds.map(() => "?").join(",");
-    const rows = db
-      .query<
-        { hash: string; filename: string; thread_id: string; content_type: string; size_bytes: number },
-        any[]
-      >(
-        `SELECT hash, filename, thread_id, content_type, size_bytes
-           FROM assets WHERE user_id = ? AND thread_id IN (${placeholders})`
-      )
-      .all(userId, ...threadIds);
-    for (const r of rows) assets.push(r);
-  }
-
-  const tagsByNote = new Map<string, string[]>();
-  for (const n of notes) tagsByNote.set(n.uuid, []);
-  if (notes.length > 0) {
-    const placeholders = notes.map(() => "?").join(",");
-    const rows = db
-      .query<{ note_uuid: string; tag: string }, string[]>(
-        `SELECT note_uuid, tag FROM note_tags WHERE note_uuid IN (${placeholders})`
-      )
-      .all(...notes.map((n) => n.uuid));
-    for (const r of rows) tagsByNote.get(r.note_uuid)?.push(r.tag);
-  }
-
-  // Tombstones since cursor — cross-device delete propagation, user-scoped.
-  const tombstones: PullTombstone[] = db
-    .query<
-      {
-        uuid: string;
-        thread_id: string;
-        origin_device_id: string | null;
-        deleted_at: string;
-        server_seq: number;
-      },
-      [string, number]
-    >(
-      `SELECT uuid, thread_id, origin_device_id, deleted_at, server_seq
-         FROM tombstones WHERE user_id = ? AND server_seq > ? ORDER BY server_seq ASC`
-    )
-    .all(userId, since);
-
-  const maxSeq = Math.max(
-    since,
-    ...notes.map((n) => n.server_seq),
-    ...entries.map((e) => e.server_seq),
-    ...tombstones.map((t) => t.server_seq)
-  );
-
-  return {
-    tombstones,
-    notes: notes.map((n) => ({
-      uuid: n.uuid,
-      slug: n.slug,
-      thread_id: n.thread_id,
-      title: n.title,
-      type: n.type,
-      theme: n.theme,
-      theme_profile: n.theme_profile,
-      body_html: n.body_html,
-      plain_text: n.plain_text,
-      created_at: n.created_at,
-      updated_at: n.updated_at,
-      expires_at: n.expires_at,
-      is_final: (n.is_final as 0 | 1),
-      live: (n.live as 0 | 1),
-      owner_device_id: n.owner_device_id,
-      origin_device_id: n.origin_device_id,
-      inline_render: (n.inline_render as 0 | 1),
-      is_pinned: (n.is_pinned as 0 | 1),
-      pinned_at: n.pinned_at,
-      superseded_by: n.superseded_by,
-      tags: tagsByNote.get(n.uuid) ?? [],
-      summary: n.summary,
-      word_count: n.word_count,
-      server_seq: n.server_seq,
-    })),
-    live_entries: entries.map((e) => ({
-      id: e.id,
-      note_uuid: e.note_uuid,
-      ts: e.ts,
-      content_html: e.content_html,
-      tags: safeJsonArray(e.tags_json),
-      occurred_at: e.occurred_at,
-      refs: safeJsonArray(e.refs_json),
-      importance: e.importance,
-      source_ref: e.source_ref,
-      server_seq: e.server_seq,
-    })),
-    assets,
-    cursor: maxSeq,
-  };
-}
-
-function safeJsonArray(s: string): string[] {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v.map(String) : [];
-  } catch {
-    return [];
-  }
 }
 
 const ASSET_MIME: Record<string, string> = {

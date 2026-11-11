@@ -8,11 +8,12 @@
  *   init        Idempotent first-run setup of data dir + DB schema.
  *   serve       Long-running process. Env: FOLIO_CLOUD_HOME / _PORT / _HOST
  *               / _PUBLIC_URL. Runs until SIGTERM/SIGINT.
- *   pair-code [--user <id>] [--expect-key <base64 SPKI DER|PEM>]
+ *   pair-code [--user <id>] --expect-key <base64 SPKI DER|PEM>
  *               Mint a 6-digit code (10-min TTL). --user required when more
- *               than one user exists in the cloud. --expect-key binds the
- *               code to one public key (sc-24117: NotiBox box identity from
- *               backplane); pairing with any other key or a bearer fails.
+ *               than one user exists in the cloud. --expect-key (required
+ *               since sc-24120) binds the code to one public key — the
+ *               NotiBox box identity from backplane (sc-24117); pairing with
+ *               any other key or a bearer fails.
  *   user-add <id> [--display "Name"]
  *               Provision a new user account (no auth state; auth lives on
  *               devices). Operator hands a pair-code over a side channel.
@@ -48,7 +49,7 @@ export async function cloudCmd(sub: string | undefined, args: string[]): Promise
     case "user-promote": return userPromote(args, true);
     case "user-demote":  return userPromote(args, false);
     default:
-      err("Usage: folio cloud {init|serve|pair-code [--user <id>]|user-add <id> [--display \"Name\"]|user-list [--json]|user-rename <old> <new>|user-revoke <id> [--purge --yes]|user-promote <id>|user-demote <id>}");
+      err("Usage: folio cloud {init|serve|pair-code [--user <id>] --expect-key <key>|user-add <id> [--display \"Name\"]|user-list [--json]|user-rename <old> <new>|user-revoke <id> [--purge --yes]|user-promote <id>|user-demote <id>}");
       return 1;
   }
 }
@@ -74,7 +75,7 @@ function cloudInitVerbose(): number {
   out(`  DB:       ${cloudDbPath()}`);
   out(`  Assets:   ${assetsDir}`);
   out("");
-  out(`Next: ${c.cyan("folio cloud user-add <name>")} then ${c.cyan("folio cloud pair-code --user <name>")} to onboard.`);
+  out(`Next: ${c.cyan("folio cloud user-add <name>")} then ${c.cyan("folio cloud pair-code --user <name> --expect-key <box key>")} to onboard.`);
   return 0;
 }
 
@@ -142,20 +143,19 @@ function cloudPairCode(args: string[]): number {
   } else if (users.length > 1) {
     err(c.err(`✗ --user <id> required when more than one user exists.\n`));
     err(c.dim(`  Known users: ${users.join(", ")}\n`));
-    err(c.dim(`  Example: folio cloud pair-code --user ${users[0]}\n`));
+    err(c.dim(`  Example: folio cloud pair-code --user ${users[0]} --expect-key <box key>\n`));
     return 4;
   } else {
     userId = users[0] ?? "default";
   }
 
-  let expectKey: string | undefined;
-  if (flags["expect-key"] !== undefined) {
-    if (typeof flags["expect-key"] !== "string") {
-      err(c.err("✗ --expect-key needs a value (base64 SPKI DER or PEM)\n"));
-      return 5;
-    }
-    expectKey = flags["expect-key"];
+  // sc-24120: every code is bound to a box key. Pairing a phone, browser or
+  // laptop without one was removed together with the cloud notebook app.
+  if (typeof flags["expect-key"] !== "string") {
+    err(c.err("✗ --expect-key <base64 SPKI DER|PEM> required — a pairing code is always bound to a box key (sc-24120)\n"));
+    return 5;
   }
+  const expectKey: string = flags["expect-key"];
   let res: ReturnType<typeof createPairingCode>;
   try {
     res = createPairingCode(userId, undefined, expectKey);
@@ -170,11 +170,10 @@ function cloudPairCode(args: string[]): number {
   out(`  Expires:      ${c.dim(expiresAt)}`);
   // Machine-read by backplane /api/folio/pair-code: the line proves this
   // cloud enforced the binding (an older folio ignores the flag silently).
-  if (boundKeyFp) out(`  Bound key:    sha256:${boundKeyFp}`);
+  out(`  Bound key:    sha256:${boundKeyFp}`);
   out("");
   out(c.dim("  Use within 10 minutes:"));
-  out(c.dim(`    curl -X POST $CLOUD/v1/auth/pair \\`));
-  out(c.dim(`      -d '{"code":"${code}","device_name":"<name>","device_id":"<ULID>"}'`));
+  out(c.dim(`    folio sync pair --remote <cloud-url> --code ${code}   (on the box holding the bound key)`));
   return 0;
 }
 
@@ -216,7 +215,7 @@ function userAdd(args: string[]): number {
   );
   out(c.ok(`✓ user '${id}' created (display: ${displayName})`));
   out("");
-  out(`  Next: ${c.cyan(`folio cloud pair-code --user ${id}`)}`);
+  out(`  Next: ${c.cyan(`folio cloud pair-code --user ${id} --expect-key <box key>`)}`);
   return 0;
 }
 

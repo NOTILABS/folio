@@ -116,17 +116,16 @@ test("bound code refuses a bearer (keyless) pair", async () => {
   expect(await res.text()).toContain("requires a device key");
 });
 
-test("unbound codes behave as before (bearer and any key)", async () => {
+test("sc-24120: unbound codes are gone — not minted, and a leftover one pairs no key", async () => {
   const { createPairingCode } = await import("../src/cloud/auth");
-  const c = createPairingCode("default");
-  expect(c.boundKeyFp).toBeUndefined();
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: c.code, device_name: "pwa", device_id: "dev-pwa" }),
-  });
-  expect(res.status).toBe(200);
-  expect(typeof ((await res.json()) as { token?: string }).token).toBe("string");
+  expect(() => createPairingCode("default")).toThrow(/bound to a box key/);
+  // A code minted before the change (expected_key NULL) is refused even for
+  // a key with a valid proof of possession.
+  const expires = new Date(Date.now() + 5 * 60_000).toISOString();
+  cloudDb().run("INSERT INTO pairing_codes (code, expires_at, user_id, expected_key) VALUES ('654321', ?, 'default', NULL)", [expires]);
+  const { pairWithKey } = await import("../src/core/cloud-auth");
+  await expect(pairWithKey(baseUrl, "654321", "laptop", "dev-laptop", undefined)).rejects.toThrow(/not bound to a box key/);
+  expect(cloudDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM devices").get()!.n).toBe(0);
 });
 
 test("expected key must be a P-256 or ed25519 SPKI", async () => {
@@ -162,9 +161,10 @@ test("CLI `folio cloud pair-code --expect-key` prints the Bound key line backpla
     const row = cloudDb().query<{ k: string }, [string]>("SELECT expected_key AS k FROM pairing_codes WHERE code = ?").get(code)!;
     expect(row.k).toBe(box.derB64);
 
+    // sc-24120: no unbound code any more — the flag is required.
     out.length = 0;
-    expect(await cloudCmd("pair-code", [])).toBe(0);
-    expect(out.join("\n")).not.toContain("Bound key");
+    expect(await cloudCmd("pair-code", [])).toBe(5);
+    expect(out.join("\n")).not.toContain("Pairing code");
 
     expect(await cloudCmd("pair-code", ["--expect-key", "zly-klucz"])).toBe(5);
     expect(await cloudCmd("pair-code", ["--expect-key"])).toBe(5);

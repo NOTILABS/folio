@@ -81,13 +81,8 @@ async function makeShareForOgQr() {
   const { startCloudServer } = await import("../src/cloud/server");
   cloud = (await startCloudServer({ port: 0, publicUrl: "https://folio.example.com" })) as any;
   cloudUrl = `http://${cloud!.hostname}:${cloud!.port}`;
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${cloudUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: "01HX-OG-TEST-DEV-00X" }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test", deviceId: "01HX-OG-TEST-DEV-00X" });
   const { token } = (await pairRes.json()) as { token: string };
 
   await fetch(`${cloudUrl}/v1/sync/push`, {
@@ -135,13 +130,8 @@ test("/p/<token>/og.svg returns an SVG with the note title + brand", async () =>
 test("/p/<token>/og.svg honors theme accent — terminal theme produces different stripe", async () => {
   await makeShareForOgQr();
   // Push a second note in terminal theme + make a share over it.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${cloudUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "t2", device_id: "01HX-OG-TEST-DEV-22X" }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "t2", deviceId: "01HX-OG-TEST-DEV-22X" });
   const { token } = (await pairRes.json()) as { token: string };
   await fetch(`${cloudUrl}/v1/sync/push`, {
     method: "POST",
@@ -214,13 +204,8 @@ test("renderSharedNotePage includes og:image / twitter:card meta", async () => {
 test("renderSharedThreadPage includes og + twitter meta", async () => {
   const share = await makeShareForOgQr();
   // Re-create as thread-scoped share for this test.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${cloudUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "t3", device_id: "01HX-OG-TEST-DEV-33X" }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "t3", deviceId: "01HX-OG-TEST-DEV-33X" });
   const { token } = (await pairRes.json()) as { token: string };
   const threadShareRes = await fetch(`${cloudUrl}/v1/share`, {
     method: "POST",

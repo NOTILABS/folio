@@ -50,13 +50,8 @@ beforeEach(async () => {
   selfDeviceId = getOrCreateDeviceId().id;
 
   // Pair this device against cloud.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${remote}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test-host-A", device_id: selfDeviceId }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test-host-A", deviceId: selfDeviceId });
   const pairBody = (await pairRes.json()) as { token: string; device_id: string };
   token = pairBody.token;
 
@@ -197,50 +192,6 @@ test("replace after first sync → supersede pointer propagates to cloud (pushSu
   expect(newRow!.superseded_by).toBeNull();
 });
 
-test("foreign superseded note pulled → writes superseded_by + hidden from listings", async () => {
-  const { loadSyncState, syncOnce } = await import("../src/core/sync");
-  const { cloudDb, nextSeq } = await import("../src/cloud/db");
-  const { listNotes } = await import("../src/core/storage");
-
-  const headUuid = "01HCCC00000000000000000HEAD";
-  const oldUuid = "01HCCC000000000000000000OLD";
-  // Seed a foreign head (superseded_by NULL) + a foreign old revision that
-  // points at it. server_seq order: head first so the chain resolves.
-  for (const [uuid, slug, sup] of [
-    [headUuid, "rev-2", null],
-    [oldUuid, "rev-1", headUuid],
-  ] as const) {
-    const seq = nextSeq(cloudDb());
-    cloudDb().run(
-      `INSERT INTO notes (uuid, slug, thread_id, title, type, theme, theme_profile,
-         body_html, plain_text, created_at, updated_at, expires_at,
-         is_final, live, owner_device_id, origin_device_id, superseded_by,
-         word_count, summary, server_seq)
-       VALUES (?, ?, 'rev-thread', ?, 'research', 'linen', 'hosted',
-               '<p>x</p>', '', '2026-05-13T10:00:00Z', '2026-05-13T10:00:00Z',
-               NULL, 0, 0, NULL, '01HXOTHERDEVICE000000000ZZ', ?, 0, NULL, ?)`,
-      [uuid, slug, `Rev ${slug}`, sup, seq]
-    );
-  }
-
-  const state = loadSyncState()!;
-  await syncOnce(state);
-
-  // The pulled old revision carries the supersede pointer locally.
-  const { db } = await import("../src/core/db");
-  const oldRow = db()
-    .query<{ superseded_by: string | null }, [string]>(
-      "SELECT superseded_by FROM notes WHERE id = ?"
-    )
-    .get(oldUuid);
-  expect(oldRow!.superseded_by).toBe(headUuid);
-
-  // Default listing hides the superseded revision, shows the head.
-  const listed = listNotes({ thread_id: "rev-thread" }).map((n) => n.id);
-  expect(listed).toContain(headUuid);
-  expect(listed).not.toContain(oldUuid);
-});
-
 test("slug collision: cloud has same (thread, slug) under different uuid → local renames", async () => {
   const { createNote } = await import("../src/core/storage");
   const { loadSyncState, syncOnce } = await import("../src/core/sync");
@@ -285,59 +236,6 @@ test("slug collision: cloud has same (thread, slug) under different uuid → loc
   expect(existsSync(join(homeDir, row!.path))).toBe(true);
 });
 
-test("foreign note in cloud → syncOnce pulls and writes file locally", async () => {
-  const { loadSyncState, syncOnce } = await import("../src/core/sync");
-  const { cloudDb, nextSeq } = await import("../src/cloud/db");
-
-  const foreignUuid = "01HBBB0000000000000000ZZZZ";
-  const seq = nextSeq(cloudDb());
-  cloudDb().run(
-    `INSERT INTO notes (uuid, slug, thread_id, title, type, theme, theme_profile,
-       body_html, plain_text, created_at, updated_at, expires_at,
-       is_final, live, owner_device_id, origin_device_id,
-       word_count, summary, server_seq)
-     VALUES (?, 'from-other', 'other-thread', 'From Other', 'research', 'linen', 'hosted',
-             '<h1>Hi from other device</h1>', '', '2026-05-13T10:00:00Z', '2026-05-13T10:00:00Z',
-             NULL, 0, 0, NULL, '01HXOTHERDEVICE000000000ZZ', 0, NULL, ?)`,
-    [foreignUuid, seq]
-  );
-  cloudDb().run(
-    "INSERT INTO note_tags (note_uuid, tag) VALUES (?, ?), (?, ?)",
-    [foreignUuid, "pulled", foreignUuid, "remote"]
-  );
-
-  const state = loadSyncState()!;
-  const r = await syncOnce(state);
-  expect(r.pulled).toBe(1);
-
-  // Local file exists.
-  const expectedPath = join(homeDir, "threads", "other-thread", "from-other.html");
-  expect(existsSync(expectedPath)).toBe(true);
-  const fullHtml = readFileSync(expectedPath, "utf-8");
-  expect(fullHtml).toContain("Hi from other device");
-  // Theme.css inlined under hosted profile is NOT — but the file has the
-  // base template structure with the theme link.
-  expect(fullHtml).toMatch(/data-folio-content/);
-
-  // Local DB has the row.
-  const { db } = await import("../src/core/db");
-  const row = db()
-    .query<{ id: string; origin_device_id: string }, [string]>(
-      "SELECT id, origin_device_id FROM notes WHERE id = ?"
-    )
-    .get(foreignUuid);
-  expect(row).not.toBeNull();
-  expect(row!.origin_device_id).toBe("01HXOTHERDEVICE000000000ZZ");
-  expect(row!.origin_device_id).not.toBe(selfDeviceId);
-
-  // Tags pulled.
-  const tags = db()
-    .query<{ tag: string }, [string]>("SELECT tag FROM tags WHERE note_id = ? ORDER BY tag")
-    .all(foreignUuid)
-    .map((r) => r.tag);
-  expect(tags).toEqual(["pulled", "remote"]);
-});
-
 test("live entries push: appended entries land in cloud after syncOnce", async () => {
   const { createNote } = await import("../src/core/storage");
   const { appendEntry, entriesPath } = await import("../src/core/live");
@@ -370,52 +268,6 @@ test("live entries push: appended entries land in cloud after syncOnce", async (
   // Second sync: nothing new.
   const r2 = await syncOnce(state);
   expect(r2.live_pushed).toBe(0);
-});
-
-test("owner-locked: pulled live note rejects local append_entry", async () => {
-  const { loadSyncState, syncOnce } = await import("../src/core/sync");
-  const { cloudDb, nextSeq } = await import("../src/cloud/db");
-  const { appendCmd } = await import("../src/cli/commands/append");
-
-  // Seed cloud with a live note owned by another device.
-  const foreignUuid = "01HCCC0000000000000000ZZZZ";
-  const foreignOwner = "01HXOWNERDEVICE000000000XXXX";
-  const seq = nextSeq(cloudDb());
-  cloudDb().run(
-    `INSERT INTO notes (uuid, slug, thread_id, title, type, theme, theme_profile,
-       body_html, plain_text, created_at, updated_at, expires_at,
-       is_final, live, owner_device_id, origin_device_id,
-       word_count, summary, server_seq)
-     VALUES (?, 'remote-live', 'shared', 'Remote Live', 'journal', 'linen', 'hosted',
-             '<p>chrome</p>', '', '2026-05-13T10:00:00Z', '2026-05-13T10:00:00Z',
-             NULL, 0, 1, ?, ?, 0, NULL, ?)`,
-    [foreignUuid, foreignOwner, foreignOwner, seq]
-  );
-
-  const state = loadSyncState()!;
-  await syncOnce(state);
-
-  // Now try to append locally — should fail with helpful message.
-  // appendCmd writes errors via console.error; intercept that.
-  const captured: string[] = [];
-  const realErr = console.error;
-  console.error = (...args: any[]) => {
-    captured.push(args.map((a) => String(a)).join(" "));
-  };
-
-  let code: number;
-  try {
-    code = await appendCmd({
-      id: foreignUuid,
-      contentInline: "<p>should fail</p>",
-    });
-  } finally {
-    console.error = realErr;
-  }
-  expect(code).not.toBe(0);
-  const stderr = captured.join("\n");
-  expect(stderr).toContain("belongs to device");
-  expect(stderr).toContain(foreignOwner);
 });
 
 test("pre-W2 note without origin_device_id pushes successfully (NULL → self assumed)", async () => {

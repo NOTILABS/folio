@@ -2,7 +2,7 @@
  * /cloud page in local viewer + /api/sync/* endpoints.
  *
  * Spins up BOTH the cloud relay (port 0) AND the local viewer (port 0)
- * in the same process, then exercises pair → state → pair-code → run →
+ * in the same process, then exercises pair → state → run →
  * unpair through the local API.
  */
 
@@ -73,8 +73,8 @@ test("GET /api/sync/state (not paired) returns paired=false", async () => {
 
 test("POST /api/sync/pair: full pair flow via local viewer", async () => {
   // Operator-side: generate a code on the cloud.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
 
   // Now hit the LOCAL viewer's pair endpoint, which talks to cloud for us.
   const r = await fetch(`${viewerUrl}/api/sync/pair`, {
@@ -100,32 +100,16 @@ test("POST /api/sync/pair: full pair flow via local viewer", async () => {
   const html = await cloudPage.text();
   expect(html).toContain("Paired with");
   expect(html).toContain("Sync now");
-  expect(html).toContain("Generate code for another device");
-});
-
-test("POST /api/sync/pair-code (paired) returns a code; (unpaired) 400", async () => {
-  // Unpaired first.
-  const r1 = await fetch(`${viewerUrl}/api/sync/pair-code`, { method: "POST" });
-  expect(r1.status).toBe(400);
-
-  // Pair, then ask for a fresh code via the local viewer.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  await fetch(`${viewerUrl}/api/sync/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ remote: cloudUrl, code, device_name: "operator" }),
-  });
-
-  const r2 = await fetch(`${viewerUrl}/api/sync/pair-code`, { method: "POST" });
-  expect(r2.status).toBe(200);
-  const body = (await r2.json()) as { code: string; expires_at: string };
-  expect(body.code).toMatch(/^[0-9]{6}$/);
+  // sc-24120: no minting codes for another device (phone pairing is gone).
+  expect(html).not.toContain("Generate code for another device");
+  expect(html).not.toContain("gen-code-btn");
+  const gone = await fetch(`${viewerUrl}/api/sync/pair-code`, { method: "POST" });
+  expect(gone.status).not.toBe(200);
 });
 
 test("POST /api/sync/run: ran after pair, returns counter shape", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -149,8 +133,8 @@ test("POST /api/sync/run: ran after pair, returns counter shape", async () => {
 });
 
 test("POST /api/sync/unpair clears local state", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -193,8 +177,8 @@ test("GET /api/cloud/stats (unpaired) returns 400", async () => {
 });
 
 test("GET /api/cloud/stats (paired) proxies cloud admin stats", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -209,8 +193,8 @@ test("GET /api/cloud/stats (paired) proxies cloud admin stats", async () => {
 });
 
 test("/cloud (paired) renders Operator card placeholder + bootstrap JS", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -227,11 +211,11 @@ test("/cloud (paired) renders Operator card placeholder + bootstrap JS", async (
 });
 
 test("/api/cloud/admin/whoami: proxies to cloud, returns operator flag", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
   // Pre-seed cloud user as operator.
   const { cloudDb } = await import("../src/cloud/db");
   cloudDb().run("UPDATE users SET is_operator = 1 WHERE id = 'default'");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -251,8 +235,8 @@ test("/api/cloud/admin/* (unpaired): 400", async () => {
 
 test("/api/cloud/admin/users (non-operator): 403 surfaced from cloud", async () => {
   // pair as default user, who's NOT an operator (default is_operator = 0).
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -265,8 +249,8 @@ test("/api/cloud/admin/users (non-operator): 403 surfaced from cloud", async () 
 test("/api/cloud/admin/users (operator): POST creates user", async () => {
   const { cloudDb } = await import("../src/cloud/db");
   cloudDb().run("UPDATE users SET is_operator = 1 WHERE id = 'default'");
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -276,20 +260,20 @@ test("/api/cloud/admin/users (operator): POST creates user", async () => {
   const r = await fetch(`${viewerUrl}/api/cloud/admin/users`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id: "bob", mint_pair_code: true }),
+    body: JSON.stringify({ id: "bob" }),
   });
   expect(r.status).toBe(200);
   const body = (await r.json()) as any;
   expect(body.user.id).toBe("bob");
-  expect(body.pair_code.code).toMatch(/^[0-9]{6}$/);
+  expect(body.pair_code).toBeUndefined(); // sc-24120: no unbound codes
 
   // Bearer never made it to page JS — the call had no Authorization header.
   // The viewer process handled the laundering.
 });
 
 test("/cloud (paired) renders Cloud stats panel that loads via /api/cloud/stats", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
+  const { localBoundCode } = await import("./_cloud-device");
+  const code = await localBoundCode();
   await fetch(`${viewerUrl}/api/sync/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },

@@ -21,13 +21,8 @@ let server: { stop: () => void; port: number; hostname: string } | null = null;
 let baseUrl: string;
 
 async function pairAs(userId: string, deviceName = `${userId}-dev`, deviceId?: string): Promise<string> {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode(userId);
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: deviceName, device_id: deviceId ?? `01HX-${userId.toUpperCase()}-${Math.random().toString(16).slice(2,10)}` }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const res = legacyPairResponse({ name: deviceName, userId, deviceId: deviceId ?? `01HX-${userId.toUpperCase()}-${Math.random().toString(16).slice(2,10)}` });
   return ((await res.json()) as { token: string }).token;
 }
 
@@ -100,7 +95,7 @@ test("/v1/admin/users: GET returns global per-user breakdown for operator", asyn
   expect(jarekRow.is_operator).toBe(true);
 });
 
-test("/v1/admin/users: POST creates user + optionally mints pair-code", async () => {
+test("/v1/admin/users: POST creates user, never mints a pair-code (sc-24120)", async () => {
   await addUser("jarek", true);
   const jarekTok = await pairAs("jarek");
 
@@ -114,9 +109,10 @@ test("/v1/admin/users: POST creates user + optionally mints pair-code", async ()
   expect(body.user.id).toBe("bob");
   expect(body.user.display_name).toBe("Bob");
   expect(body.user.is_operator).toBe(false);
-  expect(body.pair_code).not.toBeNull();
-  expect(body.pair_code.user_id).toBe("bob");
-  expect(body.pair_code.code).toMatch(/^[0-9]{6}$/);
+  // mint_pair_code is ignored: an unbound code could only pair a phone.
+  expect(body.pair_code).toBeUndefined();
+  const codes = cloudDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM pairing_codes").get()!.n;
+  expect(codes).toBe(0);
 });
 
 test("/v1/admin/users: POST rejects bad id + duplicate id", async () => {
@@ -240,27 +236,6 @@ test("/v1/admin/users/<id>: DELETE?purge=1 cascades + sets deleted_at", async ()
 
   expect(cloudDb().query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM notes WHERE user_id = ?").get("alice")?.n).toBe(0);
   expect(cloudDb().query<{ deleted_at: string | null }, [string]>("SELECT deleted_at FROM users WHERE id = ?").get("alice")?.deleted_at).not.toBeNull();
-});
-
-test("/v1/admin/users/<id>/pair-code: mints code scoped to that user", async () => {
-  await addUser("jarek", true);
-  await addUser("alice", false);
-  const jarekTok = await pairAs("jarek");
-
-  const r = await fetch(`${baseUrl}/v1/admin/users/alice/pair-code`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${jarekTok}` },
-  });
-  expect(r.status).toBe(200);
-  const body = (await r.json()) as any;
-  expect(body.user_id).toBe("alice");
-  expect(body.code).toMatch(/^[0-9]{6}$/);
-
-  // Verify pairing_codes row carries user_id='alice'.
-  const row = cloudDb()
-    .query<{ user_id: string }, [string]>("SELECT user_id FROM pairing_codes WHERE code = ?")
-    .get(body.code);
-  expect(row?.user_id).toBe("alice");
 });
 
 test("operator routes 403 for non-operator devices", async () => {

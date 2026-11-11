@@ -24,7 +24,6 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { cloudDb, cloudAssetsDir } from "./db";
-import { createPairingCode } from "./auth";
 import type { Device } from "./auth";
 
 export interface WhoamiResponse {
@@ -54,15 +53,10 @@ export interface CreateUserInput {
   id: string;
   display_name?: string;
   is_operator?: boolean;
-  /** Mint a first pair-code in the same request. Convenience for the dashboard
-   *  "+ Add user" flow — operator typically wants the code immediately after
-   *  creating the account. */
-  mint_pair_code?: boolean;
 }
 
 export interface CreateUserResult {
   user: { id: string; display_name: string; is_operator: boolean; created_at: string };
-  pair_code: { code: string; expires_at: string; user_id: string } | null;
 }
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -93,14 +87,8 @@ export function createUser(input: CreateUserInput, db: Database = cloudDb()): Cr
     "INSERT INTO users (id, display_name, is_operator, created_at) VALUES (?, ?, ?, ?)",
     [input.id, displayName, isOp, createdAt]
   );
-  let pairCode: CreateUserResult["pair_code"] = null;
-  if (input.mint_pair_code) {
-    const c = createPairingCode(input.id, db);
-    pairCode = { code: c.code, expires_at: c.expiresAt, user_id: c.userId };
-  }
   return {
     user: { id: input.id, display_name: displayName, is_operator: isOp === 1, created_at: createdAt },
-    pair_code: pairCode,
   };
 }
 
@@ -210,14 +198,4 @@ export function deleteUser(targetId: string, opts: { purge?: boolean }, db: Data
     } catch {}
   }
   return { revoked_devices: revokedDevices, purged: counts };
-}
-
-export function mintPairCodeFor(userId: string, db: Database = cloudDb()): { code: string; expires_at: string; user_id: string } {
-  const u = db
-    .query<{ id: string; deleted_at: string | null }, [string]>("SELECT id, deleted_at FROM users WHERE id = ?")
-    .get(userId);
-  if (!u) throw new AdminError(404, `user '${userId}' not found`);
-  if (u.deleted_at) throw new AdminError(409, `user '${userId}' is deleted`);
-  const c = createPairingCode(userId, db);
-  return { code: c.code, expires_at: c.expiresAt, user_id: c.userId };
 }

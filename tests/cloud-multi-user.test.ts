@@ -3,12 +3,11 @@
  * device's bearer scopes every read + write to its own user_id.
  *
  *  ✓ Same (thread_id, slug) works across users (no UNIQUE collision).
- *  ✓ /v1/feed returns only the caller's user's notes.
- *  ✓ /v1/sync/pull returns only the caller's user's rows.
+ *  ✓ Pushed rows land in the pushing device's user_id partition only.
  *  ✓ /v1/admin/stats shows only the caller's user's counts.
- *  ✓ /raw/:uuid and /n/:uuid 404 across users.
  *  ✓ Capability URL works cross-user (URL is the credential, no Folio acct).
- *  ✓ Pairing code minted by Alice creates Alice-owned device only.
+ *  (sc-24120: /v1/feed, /v1/sync/pull, authed /raw, /n shell and
+ *  /v1/auth/pair-code are gone.)
  */
 
 import { expect, test, beforeEach, afterEach } from "bun:test";
@@ -29,13 +28,8 @@ async function addUser(id: string, display = id): Promise<void> {
 }
 
 async function pairAs(userId: string, deviceName = `${userId}-laptop`, deviceId?: string): Promise<string> {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode(userId);
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: deviceName, device_id: deviceId ?? `01HX${userId.toUpperCase().padEnd(8, "X")}DEVICE0000000` }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const res = legacyPairResponse({ name: deviceName, userId, deviceId: deviceId ?? `01HX${userId.toUpperCase().padEnd(8, "X")}DEVICE0000000` });
   return ((await res.json()) as { token: string }).token;
 }
 
@@ -96,42 +90,7 @@ test("two users can have the same (thread_id, slug) — UNIQUE is per-user", asy
   expect(bobResp.notes[0].canonical_slug).toBe("alpha");
 });
 
-test("/v1/feed returns only the caller's user's notes", async () => {
-  const aliceTok = await pairAs("alice");
-  const bobTok = await pairAs("bob");
-  await push(aliceTok, [{
-    uuid: "01HXALICE001",
-    slug: "a",
-    thread_id: "t",
-    title: "Alice note",
-    type: "snippet",
-    body_html: "<p>a</p>",
-    created_at: "2026-05-15T09:00:00Z",
-  }]);
-  await push(bobTok, [{
-    uuid: "01HXBOB001",
-    slug: "b",
-    thread_id: "t",
-    title: "Bob note",
-    type: "snippet",
-    body_html: "<p>b</p>",
-    created_at: "2026-05-15T09:05:00Z",
-  }]);
-
-  const aliceFeed = (await (await fetch(`${baseUrl}/v1/feed`, {
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  })).json()) as { notes: { uuid: string; title: string }[]; threads: any[] };
-  expect(aliceFeed.notes).toHaveLength(1);
-  expect(aliceFeed.notes[0].title).toBe("Alice note");
-
-  const bobFeed = (await (await fetch(`${baseUrl}/v1/feed`, {
-    headers: { Authorization: `Bearer ${bobTok}` },
-  })).json()) as { notes: { uuid: string; title: string }[] };
-  expect(bobFeed.notes).toHaveLength(1);
-  expect(bobFeed.notes[0].title).toBe("Bob note");
-});
-
-test("/v1/sync/pull returns only the caller's notes + live entries + tombstones", async () => {
+test("push lands each user's rows in their own user_id partition", async () => {
   const aliceTok = await pairAs("alice");
   const bobTok = await pairAs("bob");
 
@@ -154,39 +113,10 @@ test("/v1/sync/pull returns only the caller's notes + live entries + tombstones"
     created_at: "2026-05-15T09:05:00Z",
   }]);
 
-  const alicePull = (await (await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  })).json()) as { notes: { uuid: string }[]; live_entries: any[]; tombstones: any[] };
-  expect(alicePull.notes.map((n) => n.uuid)).toEqual(["01HXALICE-PULL-1"]);
-
-  const bobPull = (await (await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { Authorization: `Bearer ${bobTok}` },
-  })).json()) as { notes: { uuid: string }[] };
-  expect(bobPull.notes.map((n) => n.uuid)).toEqual(["01HXBOB-PULL-1"]);
-});
-
-test("/raw/<uuid> across users: cross-user access returns 404", async () => {
-  const aliceTok = await pairAs("alice");
-  const bobTok = await pairAs("bob");
-  await push(aliceTok, [{
-    uuid: "01HXALICE-RAW",
-    slug: "r",
-    thread_id: "t",
-    title: "Secret",
-    type: "research",
-    body_html: "<p>secret</p>",
-    created_at: "2026-05-15T09:00:00Z",
-  }]);
-  // Alice can read her own /raw.
-  const ok = await fetch(`${baseUrl}/raw/01HXALICE-RAW`, {
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  });
-  expect(ok.status).toBe(200);
-  // Bob cannot.
-  const denied = await fetch(`${baseUrl}/raw/01HXALICE-RAW`, {
-    headers: { Authorization: `Bearer ${bobTok}` },
-  });
-  expect(denied.status).toBe(404);
+  const owned = (u: string) =>
+    cloudDb().query<{ uuid: string }, [string]>("SELECT uuid FROM notes WHERE user_id = ?").all(u).map((r) => r.uuid);
+  expect(owned("alice")).toEqual(["01HXALICE-PULL-1"]);
+  expect(owned("bob")).toEqual(["01HXBOB-PULL-1"]);
 });
 
 test("/v1/admin/stats is per-user — Bob sees 0 of Alice's data", async () => {
@@ -240,33 +170,8 @@ test("/v1/auth/devices is per-user — Alice sees her devices only", async () =>
   expect(aliceDevs.devices.map((d) => d.name).sort()).toEqual(["alice-laptop", "alice-phone"]);
 });
 
-test("/v1/auth/pair-code from Alice scopes the new device to Alice", async () => {
-  const aliceTok = await pairAs("alice");
-
-  // Alice mints a code via the authed endpoint (PWA "+ Add another device").
-  const codeRes = (await (await fetch(`${baseUrl}/v1/auth/pair-code`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  })).json()) as { code: string; user_id: string };
-  expect(codeRes.user_id).toBe("alice");
-
-  // A new device pairs with that code.
-  const pairRes = (await (await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: codeRes.code, device_name: "alice-2nd", device_id: "01HXALICE-2ND-DEV00" }),
-  })).json()) as { device_id: string; token: string };
-
-  // Verify the new device row belongs to Alice.
-  const row = cloudDb()
-    .query<{ user_id: string }, [string]>("SELECT user_id FROM devices WHERE id = ?")
-    .get(pairRes.device_id);
-  expect(row?.user_id).toBe("alice");
-});
-
 test("capability URL works cross-user: Alice shares with Bob, Bob reads it", async () => {
   const aliceTok = await pairAs("alice");
-  const bobTok = await pairAs("bob");
   const uuid = "01HXSHARE-X-USR";
   await push(aliceTok, [{
     uuid,
@@ -293,12 +198,6 @@ test("capability URL works cross-user: Alice shares with Bob, Bob reads it", asy
   const raw = await fetch(`${baseUrl}/p/${shareRes.token}/raw/${uuid}`);
   expect(raw.status).toBe(200);
   expect(await raw.text()).toContain("shared bytes");
-
-  // Bob's own bearer canNOT directly access /raw/uuid (that's Alice's note).
-  const direct = await fetch(`${baseUrl}/raw/${uuid}`, {
-    headers: { Authorization: `Bearer ${bobTok}` },
-  });
-  expect(direct.status).toBe(404);
 });
 
 test("Bob cannot create a share over Alice's note (uuid leaked)", async () => {
@@ -350,32 +249,8 @@ test("Bob cannot push a delete against Alice's uuid (silently skipped)", async (
   expect(body.deletes).toHaveLength(0); // silent skip — Alice's note still alive
 
   // Confirm Alice's note still exists.
-  const stillThere = await fetch(`${baseUrl}/raw/${uuid}`, {
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  });
-  expect(stillThere.status).toBe(200);
-});
-
-test("asset URL rescope: /raw/ body_html refs rewritten to /u/<user>/t/.../asset/...", async () => {
-  const aliceTok = await pairAs("alice");
-  await push(aliceTok, [{
-    uuid: "01HXALICE-IMG",
-    slug: "with-img",
-    thread_id: "gallery",
-    title: "With image",
-    type: "snippet",
-    body_html: `<p>see this:</p><img src="/t/gallery/asset/pic.png" alt="x">`,
-    created_at: "2026-05-15T09:00:00Z",
-  }]);
-
-  const r = await fetch(`${baseUrl}/raw/01HXALICE-IMG`, {
-    headers: { Authorization: `Bearer ${aliceTok}` },
-  });
-  expect(r.status).toBe(200);
-  const body = await r.text();
-  // src rewritten to per-user namespace.
-  expect(body).toContain('src="/u/alice/t/gallery/asset/pic.png"');
-  expect(body).not.toMatch(/src="\/t\/gallery\/asset/);
+  const stillThere = cloudDb().query<{ user_id: string }, [string]>("SELECT user_id FROM notes WHERE uuid = ?").get(uuid);
+  expect(stillThere?.user_id).toBe("alice");
 });
 
 test("asset URL /u/<user>/.../ pinned to that user — wrong user 404s", async () => {

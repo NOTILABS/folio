@@ -37,9 +37,16 @@ afterEach(() => {
   delete process.env.FOLIO_HOME;
 });
 
-async function code(): Promise<string> {
+/** sc-24120: every code is bound to a key. Default: this device's local
+ *  ed25519 key (created if missing), which pairWithKey then presents. */
+async function code(keyPem?: string): Promise<string> {
   const { createPairingCode } = await import("../src/cloud/auth");
-  return createPairingCode().code;
+  if (!keyPem) {
+    const { localPublicKey, generateLocalKey } = await import("../src/core/cloud-auth");
+    if (!localPublicKey()) generateLocalKey();
+    keyPem = localPublicKey()!;
+  }
+  return createPairingCode("default", undefined, keyPem).code;
 }
 
 test("pair with ed25519 key: no token, key file 0600, signed requests work", async () => {
@@ -57,7 +64,7 @@ test("pair with ed25519 key: no token, key file 0600, signed requests work", asy
   expect(row.public_key).toContain("BEGIN PUBLIC KEY");
 
   const state = { remote: baseUrl, key_alg: "ed25519" as const, device_id: "dev-mac" };
-  const get = await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`);
+  const get = await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`);
   expect(get.status).toBe(200);
   const post = await cloudFetch(state, `${baseUrl}/v1/sync/push`, {
     method: "POST",
@@ -73,7 +80,7 @@ test("pair with a key requires proof of possession", async () => {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      code: await code(), device_name: "x", device_id: "dev-x",
+      code: await code(publicKey.export({ type: "spki", format: "pem" }) as string), device_name: "x", device_id: "dev-x",
       public_key: publicKey.export({ type: "spki", format: "pem" }), key_alg: "ed25519",
     }),
   });
@@ -88,7 +95,7 @@ test("pair rejects alg/key mismatch", async () => {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      code: await code(), device_name: "x", device_id: "dev-x",
+      code: await code(publicKey.export({ type: "spki", format: "pem" }) as string), device_name: "x", device_id: "dev-x",
       public_key: publicKey.export({ type: "spki", format: "pem" }), key_alg: "ed25519",
     }),
   });
@@ -106,7 +113,7 @@ async function pairedState() {
 test("replayed request (same nonce) is rejected", async () => {
   const { signatureHeaders, localSigner } = await import("../src/core/cloud-auth");
   await pairedState();
-  const url = `${baseUrl}/v1/sync/pull?since=0`;
+  const url = `${baseUrl}/v1/auth/devices?since=0`;
   const h = await signatureHeaders(localSigner(), "dev-1", "GET", url, null);
   expect((await fetch(url, { headers: h })).status).toBe(200);
   expect((await fetch(url, { headers: h })).status).toBe(401);
@@ -116,8 +123,8 @@ test("tampered path, body, or stale timestamp is rejected", async () => {
   const { signatureHeaders, localSigner, canonicalString, sha256Hex } = await import("../src/core/cloud-auth");
   await pairedState();
   // Signed for one path, sent to another.
-  const h1 = await signatureHeaders(localSigner(), "dev-1", "GET", `${baseUrl}/v1/sync/pull?since=0`, null);
-  expect((await fetch(`${baseUrl}/v1/sync/pull?since=5`, { headers: h1 })).status).toBe(401);
+  const h1 = await signatureHeaders(localSigner(), "dev-1", "GET", `${baseUrl}/v1/auth/devices?since=0`, null);
+  expect((await fetch(`${baseUrl}/v1/auth/devices?since=5`, { headers: h1 })).status).toBe(401);
   // Signed for one body, sent with another.
   const url = `${baseUrl}/v1/sync/push`;
   const h2 = await signatureHeaders(localSigner(), "dev-1", "POST", url, JSON.stringify({ deletes: [] }));
@@ -126,9 +133,9 @@ test("tampered path, body, or stale timestamp is rejected", async () => {
   // Validly signed, but 10 minutes old.
   const ts = String(Date.now() - 10 * 60 * 1000);
   const nonce = "AAAAAAAAAAAAAAAAAAAAAA";
-  const payload = canonicalString("GET", "/v1/sync/pull?since=0", ts, nonce, sha256Hex(null));
+  const payload = canonicalString("GET", "/v1/auth/devices?since=0", ts, nonce, sha256Hex(null));
   const sig = await localSigner().sign(payload);
-  const r3 = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
+  const r3 = await fetch(`${baseUrl}/v1/auth/devices?since=0`, {
     headers: { "x-folio-device": "dev-1", "x-folio-ts": ts, "x-folio-nonce": nonce, "x-folio-sig": sig },
   });
   expect(r3.status).toBe(401);
@@ -140,8 +147,8 @@ test("signature from another key for the same device id is rejected", async () =
   const { privateKey } = generateKeyPairSync("ed25519");
   const ts = String(Date.now());
   const nonce = "BBBBBBBBBBBBBBBBBBBBBB";
-  const sig = cryptoSign(null, Buffer.from(canonicalString("GET", "/v1/sync/pull?since=0", ts, nonce, sha256Hex(null))), privateKey).toString("base64url");
-  const r = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
+  const sig = cryptoSign(null, Buffer.from(canonicalString("GET", "/v1/auth/devices?since=0", ts, nonce, sha256Hex(null))), privateKey).toString("base64url");
+  const r = await fetch(`${baseUrl}/v1/auth/devices?since=0`, {
     headers: { "x-folio-device": "dev-1", "x-folio-ts": ts, "x-folio-nonce": nonce, "x-folio-sig": sig },
   });
   expect(r.status).toBe(401);
@@ -152,31 +159,31 @@ test("revoked device cannot sign in", async () => {
   const { revokeDevice } = await import("../src/cloud/auth");
   const state = await pairedState();
   revokeDevice("dev-1");
-  expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(401);
+  expect((await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`)).status).toBe(401);
 });
 
 test("pin-key: bearer device upgrades, bearer dies, state has no token", async () => {
-  const { consumePairingCode } = await import("../src/cloud/auth");
+  const { legacyBearerDevice } = await import("./_cloud-device");
   const { pinKey, cloudFetch } = await import("../src/core/cloud-auth");
-  const { token } = consumePairingCode(await code(), "old-mac", "dev-old");
+  const { token } = legacyBearerDevice({ name: "old-mac", deviceId: "dev-old" });
   const state: any = { remote: baseUrl, device_token: token };
-  expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(200);
+  expect((await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`)).status).toBe(200);
 
   await pinKey(state, "dev-old");
   expect(state.device_token).toBeUndefined();
   expect(state.key_alg).toBe("ed25519");
   expect(state.device_id).toBe("dev-old");
 
-  expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(200);
-  const old = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
+  expect((await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`)).status).toBe(200);
+  const old = await fetch(`${baseUrl}/v1/auth/devices?since=0`, { headers: { authorization: `Bearer ${token}` } });
   expect(old.status).toBe(401);
 });
 
 test("pin-key refuses while folio sync holds the lock; state and bearer untouched", async () => {
-  const { consumePairingCode } = await import("../src/cloud/auth");
+  const { legacyBearerDevice } = await import("./_cloud-device");
   const { saveSyncState, loadSyncState, acquireLock, releaseLock } = await import("../src/core/sync");
   const { syncCmd } = await import("../src/cli/commands/sync");
-  const { token } = consumePairingCode(await code(), "old-mac", "dev-old");
+  const { token } = legacyBearerDevice({ name: "old-mac", deviceId: "dev-old" });
   saveSyncState({ remote: baseUrl, device_id: "dev-old", device_token: token, last_pulled_seq: 0, last_pushed_at: null, last_live_pushed: {} } as any);
 
   acquireLock(); // a running daemon (live pid) holds the lock
@@ -188,7 +195,7 @@ test("pin-key refuses while folio sync holds the lock; state and bearer untouche
   const st: any = loadSyncState();
   expect(st.device_token).toBe(token);
   expect(st.key_alg).toBeUndefined();
-  const still = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
+  const still = await fetch(`${baseUrl}/v1/auth/devices?since=0`, { headers: { authorization: `Bearer ${token}` } });
   expect(still.status).toBe(200);
 
   // Daemon stopped → pin-key goes through and leaves no lock behind.
@@ -200,8 +207,8 @@ test("pin-key refuses while folio sync holds the lock; state and bearer untouche
 });
 
 test("pin-key without proof of possession is refused and bearer survives", async () => {
-  const { consumePairingCode } = await import("../src/cloud/auth");
-  const { token } = consumePairingCode(await code(), "old-mac", "dev-old");
+  const { legacyBearerDevice } = await import("./_cloud-device");
+  const { token } = legacyBearerDevice({ name: "old-mac", deviceId: "dev-old" });
   const { publicKey } = generateKeyPairSync("ed25519");
   const res = await fetch(`${baseUrl}/v1/auth/pin-key`, {
     method: "POST",
@@ -209,7 +216,7 @@ test("pin-key without proof of possession is refused and bearer survives", async
     body: JSON.stringify({ public_key: publicKey.export({ type: "spki", format: "pem" }), key_alg: "ed25519" }),
   });
   expect(res.status).toBe(400);
-  const still = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
+  const still = await fetch(`${baseUrl}/v1/auth/devices?since=0`, { headers: { authorization: `Bearer ${token}` } });
   expect(still.status).toBe(200);
 });
 
@@ -231,13 +238,13 @@ test("p256 via remote signer (NotiBox gate contract), P1363 and DER both verify"
   }) as any;
   const signerUrl = `http://127.0.0.1:${signerSrv!.port}/folio-sign`;
   const { pairWithKey, cloudFetch } = await import("../src/core/cloud-auth");
-  const r = await pairWithKey(baseUrl, await code(), "notibox-f8c0", "dev-box", signerUrl);
+  const r = await pairWithKey(baseUrl, await code(pubPem), "notibox-f8c0", "dev-box", signerUrl);
   expect(r.key_alg).toBe("p256");
   expect(r.signer_url).toBe(signerUrl);
   const state = { remote: baseUrl, key_alg: "p256" as const, device_id: "dev-box", signer_url: signerUrl };
-  expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(200);
+  expect((await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`)).status).toBe(200);
   der = true;
-  expect((await cloudFetch(state, `${baseUrl}/v1/sync/pull?since=0`)).status).toBe(200);
+  expect((await cloudFetch(state, `${baseUrl}/v1/auth/devices?since=0`)).status).toBe(200);
   expect(seen.every((p) => p.startsWith("folio-sync-v1\n"))).toBe(true);
   // No private key file is written on the box path.
   const { existsSync } = await import("node:fs");
@@ -258,11 +265,11 @@ test("asset upload body (bytes) is covered by the signature", async () => {
   expect(res.status).toBeLessThan(300);
 });
 
-test("legacy bearer devices (PWA, pre-sc-24117) keep working", async () => {
-  const { consumePairingCode } = await import("../src/cloud/auth");
-  const { token } = consumePairingCode(await code(), "iphone", undefined);
+test("legacy bearer devices (paired before sc-24117 / sc-24120) keep working", async () => {
+  const { legacyBearerDevice } = await import("./_cloud-device");
+  const { token } = legacyBearerDevice({ name: "iphone" });
   expect(typeof token).toBe("string");
-  const r = await fetch(`${baseUrl}/v1/sync/pull?since=0`, { headers: { authorization: `Bearer ${token}` } });
+  const r = await fetch(`${baseUrl}/v1/auth/devices?since=0`, { headers: { authorization: `Bearer ${token}` } });
   expect(r.status).toBe(200);
   void readFileSync;
 });
