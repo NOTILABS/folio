@@ -273,8 +273,11 @@ test("createPairingCode + consumePairingCode stamps user_id end-to-end", async (
 
   db.run("INSERT INTO users (id, display_name, created_at) VALUES ('alice', 'Alice', strftime('%Y-%m-%dT%H:%M:%fZ','now'))");
 
-  const { code } = createPairingCode("alice");
-  const { deviceId } = consumePairingCode(code, "alice-laptop", undefined);
+  // sc-24120: codes are bound to a box key; the box presents that key.
+  const { ed25519Key } = await import("./_cloud-device");
+  const key = ed25519Key();
+  const { code } = createPairingCode("alice", undefined, key.derB64);
+  const { deviceId } = consumePairingCode(code, "alice-box", "dev-alice-box", undefined, { publicKeyPem: key.pem, alg: "ed25519" });
 
   // The newly-paired device row carries user_id='alice'.
   const row = db.query<{ user_id: string }, [string]>(
@@ -347,10 +350,10 @@ test("authenticate() returns Device.isOperator from users.is_operator", async ()
   cloudDb();
   const db = cloudDb();
   db.run("INSERT INTO users (id, display_name, is_operator, created_at) VALUES ('jarek', 'Jarek', 1, '2026-05-01T10:00:00Z')");
-  const { createPairingCode, consumePairingCode, authenticate } = await import("../src/cloud/auth");
-  const { code } = createPairingCode("jarek");
-  const { token } = consumePairingCode(code, "jarek-laptop", undefined);
-  const dev = authenticate(token!);
+  const { authenticate } = await import("../src/cloud/auth");
+  const { legacyBearerDevice } = await import("./_cloud-device");
+  const { token } = legacyBearerDevice({ name: "jarek-laptop", userId: "jarek" });
+  const dev = authenticate(token);
   expect(dev).not.toBeNull();
   expect(dev?.userId).toBe("jarek");
   expect(dev?.isOperator).toBe(true);
@@ -362,9 +365,11 @@ test("createPairingCode without --user defaults to 'default'", async () => {
   const { cloudDb: getDb } = await import("../src/cloud/db");
   const db = getDb();
 
-  const { code, userId } = createPairingCode(); // no userId param
+  const { ed25519Key } = await import("./_cloud-device");
+  const key = ed25519Key();
+  const { code, userId } = createPairingCode(undefined, undefined, key.derB64); // no userId param
   expect(userId).toBe("default");
-  const { deviceId } = consumePairingCode(code, "legacy-laptop", undefined);
+  const { deviceId } = consumePairingCode(code, "legacy-box", "dev-legacy-box", undefined, { publicKeyPem: key.pem, alg: "ed25519" });
 
   const row = db.query<{ user_id: string }, [string]>(
     "SELECT user_id FROM devices WHERE id = ?"

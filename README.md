@@ -49,12 +49,11 @@ The page runs entirely inside Folio's null-origin sandboxed iframe with CSP `con
 
 ## Status
 
-**v0.30.4 — shippable.** Stable MCP contract, 667 tests across 60 files, pre-compiled binaries for darwin-arm64 / linux-x64 / linux-arm64. Cloud + PWA + publish + iteration + project workspace + viewer share UI all ride on the same machinery — opt in to one without losing the others.
+**v0.30.4 — shippable.** Stable MCP contract, 667 tests across 60 files, pre-compiled binaries for darwin-arm64 / linux-x64 / linux-arm64. Cloud publish + iteration + project workspace + viewer share UI all ride on the same machinery — opt in to one without losing the others.
 
 - ✅ Core flow: agent → MCP `create` → note on disk → `/n/<id>` renders
-- ✅ Sync daemon (`folio sync`) mirrors `~/Folio/` to an optional cloud relay — bidirectional notes + assets + tombstones
-- ✅ Read-only PWA on phone with install banner (`beforeinstallprompt` on Chrome/Edge, inline Share→Add-to-Home-Screen hint on iOS Safari)
-- ✅ Live note SSE forwarding through cloud — phone watches new entries in real time; **inline-rendered live mode** (v0.17) puts entries straight in the body
+- ✅ Sync daemon (`folio sync`) pushes to an optional cloud relay — one-way publish relay since sc-24120 (no pull, no cloud notebook/PWA)
+- ✅ **Inline-rendered live mode** (v0.17) puts live entries straight in the note body
 - ✅ **Iteration primitive** (v0.18) — `propose_round` / `pick_variant` / `iteration_state` MCP tools + viewer gallery render with click-to-pick; cloud renders read-only
 - ✅ **Viewer share UI** (v0.19) — topbar `↗ Share` popover + `/n/:id/shares` manage page; previously CLI/MCP only
 - ✅ **`wait_for_pick` MCP tool** (v0.19.1) — agent long-polls Folio's SSE hub instead of waiting for the user to confirm a pick in chat
@@ -321,7 +320,7 @@ Re-attaching the same filename overwrites in place (idempotent uploads). Notes t
 
 ## Cloud sync (optional)
 
-`folio serve` keeps everything on `127.0.0.1:4810` — but if you want notes on your phone (offline-capable PWA) or to share a note with someone over the internet, point a small relay at an existing VPS and tie devices to it.
+`folio serve` keeps everything on `127.0.0.1:4810` — but if you want to share a note with someone over the internet, point a small relay at an existing VPS and tie devices to it. The relay is a one-way **publish relay** (sc-24120): devices push, capability URLs (`folio publish`) serve. There is no cloud notebook app (PWA) and no pull.
 
 The relay is the same Folio binary in a different mode:
 
@@ -334,7 +333,7 @@ curl -L https://github.com/jzmudzinski/folio/raw/main/deploy/bootstrap.sh \
 sudo ./deploy/install.sh        # systemd unit, bare-metal, no docker — see deploy/README.md
 sudo systemctl edit folio-cloud # set FOLIO_CLOUD_PUBLIC_URL=https://folio.example.com
 sudo systemctl restart folio-cloud
-sudo -u folio /opt/folio/folio cloud pair-code     # first pairing code (10-min TTL)
+sudo -u folio /opt/folio/folio cloud pair-code --expect-key <device public key>   # 10-min TTL, bound to that key
 ```
 
 ```bash
@@ -348,14 +347,7 @@ folio sync
 folio sync --once
 ```
 
-Every subsequent device pairs through the UI — no SSH:
-
-```
-laptop /cloud → "Generate code for another device" → 482910
-phone /pair  → enter 482910 → done
-```
-
-Phone gets `https://folio.example.com` as a PWA — install to home screen from Safari/Chrome, browse notes offline, tap a thread name to filter. Read-only by design: notes are created on the writer device, the PWA never writes.
+Every pairing code is bound to the key of the device it pairs (`--expect-key`); NotiBox boxes get theirs from backplane automatically. Phone/browser pairing was removed with the PWA (sc-24120).
 
 ### `folio publish` — share with someone who has no Folio
 
@@ -407,8 +399,7 @@ Full theme list and contract: [`themes/README.md`](themes/README.md).
 - **Vanilla viewer** — server-rendered HTML + vanilla JS for the helpers (lightbox, copy-code, heading anchors, TOC with scroll spy, reading progress, theme preview switcher, prev/next in thread, print via postMessage so chrome doesn't leak into the PDF, **topbar Share popover** with outside-click/Esc dismiss).
 - **SSE hub** (`src/core/sse-hub.ts`) — in-process pub/sub on every note's `.entries.jsonl`. Direct `publish` calls from MCP/CLI writers fan out instantly; `fs.watch` is the fallback for out-of-process appends. Powers live note streaming AND `wait_for_pick` (v0.19.1) — the same channel that feeds the viewer iframe also feeds the agent's long-poll.
 - **Iteration primitive** (v0.18+) — `kind:variant` + `kind:pick` tagged entries on the live-notes JSONL substrate. Tree-shaped (`parent:<variant_id>` tag), pure-function state compute, finalize compiles picked lineage into a static "Final design + Iteration history" body.
-- **One Folio binary, three modes:** `folio serve` (local viewer, default), `folio sync` (push/pull daemon against a cloud relay), `folio cloud serve` (the relay itself — reuses the same viewer + theme stack with bearer auth on top).
-- **PWA** = stateless JS shells served by the cloud relay. Token lives in IndexedDB only; service worker SWR-caches notes for offline reads.
+- **One Folio binary, three modes:** `folio serve` (local viewer, default), `folio sync` (push daemon against a cloud relay), `folio cloud serve` (the relay itself — reuses the same viewer + theme stack with bearer auth on top).
 - **Capability URLs** are 32-byte b64url tokens server-side; scope is enforced per-request (note vs thread). Body asset URLs rewrite through `/p/<token>/` so shared notes render with images and the iframe sandbox stays null-origin. Optional recipient-binding hashes the email locally with SHA-256 — cloud stores only the hash.
 - **MCP SDK** for the stdio server (`folio-mcp` over stdio for OpenClaw / Claude Desktop / Claude Code).
 
@@ -422,7 +413,7 @@ No React, no frontend framework, no build step at runtime. Notes are pure HTML f
 
 Tests:
 - `bun test` runs the unit suite (**458 tests across 44 files**, ~8s). Covers storage, MCP tools (incl. iteration + wait_for_pick), viewer routes (incl. share UI proxies), cloud auth + sync, schema migrators, share validation, doctor diagnostics, sanitizer.
-- `bun run test:pwa` runs the Playwright headless-browser suite (~2s after first browser install via `bun run test:pwa:install`). Covers pair flow, IDB token, blob-URL iframe handshake, sandbox attribute integrity.
+- `bun run test:pwa` runs the Playwright headless-browser suite (~2s after first browser install via `bun run test:pwa:install`). Covers the capability-URL pick flow and the viewer share popover.
 
 Branch protection on `main` means changes flow through PRs. Release flow: PR merge → `git tag v0.X.Y` on the merge commit → `git push origin v0.X.Y` triggers `.github/workflows/release.yml` which builds the three target triples and publishes a GitHub Release.
 

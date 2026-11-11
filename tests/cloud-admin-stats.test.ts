@@ -14,13 +14,8 @@ let baseUrl: string;
 let token = "";
 
 async function pair(deviceName = "test", deviceId = "01HXTESTDEV0000000000000000"): Promise<string> {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: deviceName, device_id: deviceId }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const res = legacyPairResponse({ name: deviceName, deviceId: deviceId });
   const { token: t } = (await res.json()) as { token: string };
   return t;
 }

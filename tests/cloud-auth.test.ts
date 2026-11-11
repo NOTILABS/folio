@@ -2,7 +2,7 @@ import { expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { closeCloudDb } from "../src/cloud/db";
+import { closeCloudDb, cloudDb } from "../src/cloud/db";
 
 let tmpDir: string;
 let server: { stop: () => void; port: number; hostname: string } | null = null;
@@ -39,41 +39,16 @@ test("v1/version is public", async () => {
 });
 
 test("authed routes return 401 without bearer", async () => {
-  const res = await fetch(`${baseUrl}/v1/sync/pull?since=0`);
+  const res = await fetch(`${baseUrl}/v1/auth/devices`);
   expect(res.status).toBe(401);
   expect((await res.json()).error).toBe("unauthorized");
 });
 
 test("authed routes return 401 with invalid bearer", async () => {
-  const res = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
+  const res = await fetch(`${baseUrl}/v1/auth/devices`, {
     headers: { authorization: "Bearer not-a-real-token-1234567890" },
   });
   expect(res.status).toBe(401);
-});
-
-test("pairing flow: code → token → authed access", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-
-  // Pair
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test-laptop" }),
-  });
-  expect(pairRes.status).toBe(200);
-  const { device_id, token } = (await pairRes.json()) as { device_id: string; token: string };
-  expect(device_id).toMatch(/^[0-9a-f-]{36}$/);
-  expect(token.length).toBeGreaterThan(20);
-
-  // Authed pull should now succeed
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  expect(pullRes.status).toBe(200);
-  const body = (await pullRes.json()) as { notes: unknown[]; cursor: number };
-  expect(body.notes).toEqual([]);
-  expect(body.cursor).toBe(0);
 });
 
 test("pairing rejects invalid code", async () => {
@@ -86,14 +61,8 @@ test("pairing rejects invalid code", async () => {
 });
 
 test("device list + revoke flow", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "doomed-laptop" }),
-  });
-  const { device_id, token } = (await pairRes.json()) as { device_id: string; token: string };
+  const { legacyBearerDevice } = await import("./_cloud-device");
+  const { deviceId: device_id, token } = legacyBearerDevice({ name: "doomed-laptop" });
 
   // List shows 1 device
   const listRes = await fetch(`${baseUrl}/v1/auth/devices`, {
@@ -112,81 +81,65 @@ test("device list + revoke flow", async () => {
   expect(revokeRes.status).toBe(200);
 
   // Now the same token is unauthorized
-  const followup = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
+  const followup = await fetch(`${baseUrl}/v1/auth/devices`, {
     headers: { authorization: `Bearer ${token}` },
   });
   expect(followup.status).toBe(401);
 });
 
-test("pair with already-known device_id rotates token (re-pair after lost token)", async () => {
+// ----- sc-24120: only a box pairs, with a code bound to its key -----
+
+test("sc-24120: createPairingCode without a box key throws", async () => {
   const { createPairingCode } = await import("../src/cloud/auth");
-  const clientDeviceId = "01HXTESTDEVICE0000000000XX";
-
-  // First pair.
-  const { code: c1 } = createPairingCode();
-  const r1 = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: c1, device_name: "phone", device_id: clientDeviceId }),
-  });
-  expect(r1.status).toBe(200);
-  const t1 = ((await r1.json()) as { token: string }).token;
-
-  // Second pair, fresh code, same client device_id. Should succeed (UPSERT)
-  // and return a new token. The old token must stop working.
-  const { code: c2 } = createPairingCode();
-  const r2 = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: c2, device_name: "phone-renamed", device_id: clientDeviceId }),
-  });
-  expect(r2.status).toBe(200);
-  const body2 = (await r2.json()) as { device_id: string; token: string };
-  expect(body2.device_id).toBe(clientDeviceId);
-  expect(body2.token).not.toBe(t1);
-
-  // Old token rejected.
-  const stale = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${t1}` },
-  });
-  expect(stale.status).toBe(401);
-
-  // New token authorized.
-  const fresh = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${body2.token}` },
-  });
-  expect(fresh.status).toBe(200);
+  expect(() => createPairingCode()).toThrow(/bound to a box key/);
+  expect(() => createPairingCode("default", undefined, "")).toThrow(/bound to a box key/);
+  expect(cloudDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM pairing_codes").get()!.n).toBe(0);
 });
 
-test("re-consume of pairing code rotates token on the same device", async () => {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const r1 = await fetch(`${baseUrl}/v1/auth/pair`, {
+test("sc-24120: an unbound code minted before the change is refused, no device created", async () => {
+  // What a phone/browser code left over from before the change looks like.
+  const expires = new Date(Date.now() + 5 * 60_000).toISOString();
+  cloudDb().run("INSERT INTO pairing_codes (code, expires_at, user_id, expected_key) VALUES ('123456', ?, 'default', NULL)", [expires]);
+  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "laptop" }),
+    body: JSON.stringify({ code: "123456", device_name: "iphone" }),
   });
-  const { device_id: id1, token: t1 } = (await r1.json()) as { device_id: string; token: string };
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: string }).error).toMatch(/not bound to a box key/);
+  expect(cloudDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM devices").get()!.n).toBe(0);
+});
 
-  // Reuse the same code: same device row, new token, old token invalidated.
-  const r2 = await fetch(`${baseUrl}/v1/auth/pair`, {
+test("sc-24120: a bound code does not pair a bearer (no key in the request)", async () => {
+  const { ed25519Key, boundPairingCode } = await import("./_cloud-device");
+  const code = boundPairingCode(ed25519Key());
+  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "laptop" }),
+    body: JSON.stringify({ code, device_name: "iphone" }),
   });
-  const { device_id: id2, token: t2 } = (await r2.json()) as { device_id: string; token: string };
-  expect(id2).toBe(id1);
-  expect(t2).not.toBe(t1);
+  expect(res.status).toBe(400);
+  expect(cloudDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM devices").get()!.n).toBe(0);
+});
 
-  // Old token rejected
-  const stale = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${t1}` },
-  });
-  expect(stale.status).toBe(401);
-
-  // New token works
-  const fresh = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${t2}` },
-  });
-  expect(fresh.status).toBe(200);
+test("sc-24120: the cloud notebook app and pull are gone", async () => {
+  const { legacyBearerDevice } = await import("./_cloud-device");
+  const { token } = legacyBearerDevice();
+  const auth = { authorization: `Bearer ${token}` };
+  // Formerly public PWA surfaces: now unknown paths behind the auth gate.
+  for (const path of ["/", "/pair", "/manifest.webmanifest", "/sw.js", "/icons/folio.svg", "/n/019e2110-0000-7000-8000-000000000001"]) {
+    expect((await fetch(`${baseUrl}${path}`)).status).toBe(401);
+    expect((await fetch(`${baseUrl}${path}`, { headers: auth })).status).toBe(404);
+  }
+  for (const [method, path] of [
+    ["GET", "/v1/sync/pull?since=0"],
+    ["GET", "/v1/sync/live-stream?note_uuid=x"],
+    ["GET", "/v1/feed"],
+    ["GET", "/raw/019e2110-0000-7000-8000-000000000001"],
+    ["POST", "/v1/auth/pair-code"],
+  ] as const) {
+    expect((await fetch(`${baseUrl}${path}`, { method, headers: auth })).status).toBe(404);
+  }
+  // The live-stream query-param token no longer authenticates anything.
+  expect((await fetch(`${baseUrl}/v1/auth/devices?token=${token}`)).status).toBe(401);
 });

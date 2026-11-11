@@ -58,15 +58,10 @@ test("doctor unpaired: cloud.paired=false, no reachability probe", async () => {
 
 test("doctor paired + reachable: reports ok on both reachable + token_valid", async () => {
   // Pair via the local viewer's flow.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
   const { getOrCreateDeviceId } = await import("../src/core/config");
   const dev = getOrCreateDeviceId();
-  const pairRes = await fetch(`${cloudUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: dev.name, device_id: dev.id }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: dev.name, deviceId: dev.id });
   const { token } = (await pairRes.json()) as { token: string };
   const { saveSyncState } = await import("../src/core/sync");
   saveSyncState({
@@ -169,15 +164,10 @@ test("storage section reports folio_home, db, themes, templates", async () => {
 
 test("stale recency triggers warning when last_pushed_at is old", async () => {
   // Pair so we have a remote to talk to, but state's last_pushed_at is 10d old.
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
   const { getOrCreateDeviceId } = await import("../src/core/config");
   const dev = getOrCreateDeviceId();
-  const pairRes = await fetch(`${cloudUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: dev.name, device_id: dev.id }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: dev.name, deviceId: dev.id });
   const { token } = (await pairRes.json()) as { token: string };
   const tenDaysAgo = new Date(Date.now() - 10 * 86400_000).toISOString();
   const { saveSyncState } = await import("../src/core/sync");

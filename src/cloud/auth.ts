@@ -115,7 +115,10 @@ export function createPairingCode(
   db: Database = cloudDb(),
   expectedKey?: string
 ): CreatePairingCodeResult {
-  const bound = expectedKey ? normalizeExpectedKey(expectedKey) : null;
+  // sc-24120: a code must be bound to the box key it will pair. Unbound codes
+  // served phone/browser pairing, which is gone.
+  if (!expectedKey) throw new Error("a pairing code must be bound to a box key (--expect-key) — unbound pairing was removed (sc-24120)");
+  const bound = normalizeExpectedKey(expectedKey);
   // Clean up expired codes opportunistically — cheap, prevents indefinite growth.
   db.run("DELETE FROM pairing_codes WHERE expires_at < ?", [new Date().toISOString()]);
   // Retry once on the astronomically unlikely PK collision.
@@ -184,6 +187,10 @@ export function consumePairingCode(
     .get(code);
   if (!row) throw new Error("invalid pairing code");
   if (new Date(row.expires_at).getTime() < Date.now()) throw new Error("pairing code expired");
+  // sc-24120: only a box pairs, and only with the key backplane pinned for it.
+  // An unbound code (phone/browser/laptop pairing, removed) is refused even
+  // if one minted before this change is still within its TTL.
+  if (!row.expected_key) throw new Error("pairing code is not bound to a box key — device pairing without a box key was removed (sc-24120)");
   // sc-24117 PR C: a code bound to a key (NotiBox box identity pinned in
   // backplane) pairs only that key — no bearer, no other key. The caller has
   // already checked proof of possession, so a match means the device holds it.
@@ -354,25 +361,10 @@ export function listDevices(userId?: string, db: Database = cloudDb()): Device[]
 export function isPublicPath(pathname: string): boolean {
   if (pathname === "/healthz") return true;
   if (pathname === "/v1/version") return true;
-  if (pathname === "/manifest.webmanifest") return true;
-  // App shell is public — it contains no data, only a JS bootstrap that
-  // reads the token from IndexedDB on the client. If no token, the shell
-  // redirects to /pair. If token present, it fetches /v1/feed (authed).
-  if (pathname === "/") return true;
-  if (pathname === "/pair") return true;
-  // /n/:uuid is ALSO a public JS shell (W3-fix-2): it reads the bearer
-  // token from IDB client-side and fetches /raw/:uuid with auth. This
-  // avoids the SW-controllerchange race on first navigation after install.
-  // The outer page leaks nothing (just the uuid in the URL, no content).
-  if (pathname.startsWith("/n/")) return true;
-  // /t/:thread_id — same JS-shell pattern as /n/. Public page that fetches
-  // its data via /v1/feed?thread= with the bearer token from IDB. Note that
-  // /t/:thread_id/asset/:filename is ALSO public — body_html in rendered
-  // notes references assets by relative path, and sub-resource fetches
-  // from a sandboxed null-origin iframe can't easily carry bearer headers.
-  // Asset URLs aren't enumerable without knowing thread_id + filename, and
-  // the cloud's data is content the user explicitly pushed there — same
-  // posture as the local viewer where assets are served auth-less from disk.
+  // /t/:thread_id/asset/:filename — legacy public asset bytes. Sub-resource
+  // fetches from a sandboxed null-origin iframe can't carry bearer headers;
+  // asset URLs aren't enumerable without knowing thread_id + filename.
+  // (The PWA shells at /, /pair, /n/:uuid and /t/:thread_id are gone, sc-24120.)
   if (pathname.startsWith("/t/")) return true;
   // /u/:user/t/:thread/asset/:file — v0.13+ per-user public asset route.
   // Same posture as /t/.../asset/... (sub-resource for sandboxed iframes),
@@ -381,9 +373,6 @@ export function isPublicPath(pathname: string): boolean {
   if (pathname.startsWith("/p/")) return true;
   // POST /v1/auth/pair is the entry point — also unauthed.
   if (pathname === "/v1/auth/pair") return true;
-  // Icons + service worker served unauth for PWA bootstrap (W3).
-  if (pathname.startsWith("/icons/")) return true;
-  if (pathname === "/sw.js") return true;
   return false;
 }
 

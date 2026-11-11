@@ -42,13 +42,8 @@ beforeEach(async () => {
   selfDeviceId = getOrCreateDeviceId().id;
   await saveConfig({ ...(await loadConfig()), auto_sync: false, sync_scope: "shared" });
 
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: selfDeviceId }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test", deviceId: selfDeviceId });
   token = ((await pairRes.json()) as { token: string }).token;
 
   const { saveSyncState } = await import("../src/core/sync");

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeDb } from "../src/core/db";
 import { NOTE_BOOTSTRAP } from "../src/viewer/note-bootstrap";
-import { renderStandaloneNote, renderSharedNotePage, renderNotePage } from "../src/cloud/render";
+import { renderStandaloneNote, renderSharedNotePage } from "../src/cloud/render";
 
 let tmp: string;
 beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "folio-links-")); process.env.FOLIO_HOME = tmp; });
@@ -47,12 +47,6 @@ test("cloud capability page prefixes the token so links stay in-scope", () => {
   expect(html).toContain("'navigate'");
   expect(html).toContain("SCOPE + href");
   expect(html).toContain('"TOK123"');
-});
-
-test("cloud PWA shell navigates root-relative on a navigate message", () => {
-  const html = renderNotePage("uuid1", "Title");
-  expect(html).toContain("'navigate'");
-  expect(html).toContain("window.location.assign(href)");
 });
 
 // Behavioural: run the capability page's relay script against a stub window

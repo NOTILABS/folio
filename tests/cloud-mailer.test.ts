@@ -31,13 +31,8 @@ class RecordingMailer implements Mailer {
 }
 
 async function pair(): Promise<string> {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: "01HXMAILTEST00000000000000" }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const res = legacyPairResponse({ name: "test", deviceId: "01HXMAILTEST00000000000000" });
   return ((await res.json()) as { token: string }).token;
 }
 

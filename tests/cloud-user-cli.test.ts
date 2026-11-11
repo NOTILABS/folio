@@ -8,6 +8,10 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeCloudDb, cloudDb } from "../src/cloud/db";
+import { ed25519Key } from "./_cloud-device";
+
+// sc-24120: every pair-code is bound to a box key.
+const BOX_KEY = ed25519Key().derB64;
 
 let tmpDir: string;
 let stdout: string[];
@@ -115,7 +119,7 @@ test("pair-code --user: required when >1 user exists; scopes the code", async ()
 
   // With --user alice → succeeds; pairing_codes row carries user_id='alice'.
   stdout.length = 0;
-  const rc2 = await run("pair-code", ["--user", "alice"]);
+  const rc2 = await run("pair-code", ["--user", "alice", "--expect-key", BOX_KEY]);
   expect(rc2).toBe(0);
   const text = stdout.join("");
   // Capture the 6-digit code from output.
@@ -137,7 +141,7 @@ test("pair-code --user unknown id → error with hint", async () => {
 });
 
 test("pair-code with single user (only 'default') works without --user", async () => {
-  const rc = await run("pair-code");
+  const rc = await run("pair-code", ["--expect-key", BOX_KEY]);
   expect(rc).toBe(0);
   const codes = cloudDb()
     .query<{ user_id: string }, []>("SELECT user_id FROM pairing_codes")
@@ -225,7 +229,7 @@ test("regression: top-level dispatcher forwards --flag value to cloud subcommand
   await main(["bun", "folio", "cloud", "user-add", "alice"]);
   stderr.length = 0;
   stdout.length = 0;
-  const rc = await main(["bun", "folio", "cloud", "pair-code", "--user", "alice"]);
+  const rc = await main(["bun", "folio", "cloud", "pair-code", "--user", "alice", "--expect-key", BOX_KEY]);
   expect(rc).toBe(0);
   // Output should contain the user we asked for + the minted code.
   const text = stdout.join("");

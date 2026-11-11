@@ -3048,10 +3048,9 @@ export interface CloudPageState {
  * Sync + cloud pairing surface for the local viewer. Renders one of two
  * modes:
  *   • Not paired: form to enter the cloud URL + a 6-digit pairing code
- *     (obtained from `folio cloud pair-code` on the server for first pair,
- *     or from another already-paired device's "generate code" button).
+ *     (bound to the box key: `notibox-folio-cloud enable`, sc-24120).
  *   • Paired:    status (remote, device id, last sync, etc.) plus action
- *     buttons (sync now, generate code for another device, unpair).
+ *     buttons (sync now, unpair).
  *
  * All state mutations go through local-only `/api/sync/*` endpoints — the
  * page never holds the cloud bearer token in JS or DOM, it lives in
@@ -3076,9 +3075,8 @@ function cloudUnpairedBody(): string {
   return `<div class="cloud-card">
     <h3>Pair this device</h3>
     <p class="lead">
-      First time pairing? Get a code by SSH-ing into the cloud server and running:
-      <code class="cloud-code">sudo -u folio /opt/folio/folio cloud pair-code</code>
-      Already have another device paired? Use its "Generate code for another device" button instead.
+      Only a NotiBox box pairs, with a code bound to its key. The box gets one
+      through <code class="cloud-code">notibox-folio-cloud enable</code>; phone and browser pairing was removed.
     </p>
     <form id="pair-form" autocomplete="off">
       <label>Cloud URL
@@ -3108,18 +3106,9 @@ function cloudPairedBody(state: CloudPageState): string {
     </dl>
     <div class="cloud-actions">
       <button id="sync-now-btn" class="primary">↻ Sync now</button>
-      <button id="gen-code-btn">+ Generate code for another device</button>
       <button id="unpair-btn" class="danger">Unpair this device</button>
     </div>
     <div id="sync-result"></div>
-    <div id="generated-code" class="generated" hidden>
-      <div class="code-row">
-        <div class="code-label">Pairing code (10 min)</div>
-        <div class="code-value" id="generated-code-value"></div>
-        <button id="copy-code-btn" class="copy">⎘ Copy</button>
-      </div>
-      <p class="hint">Enter this on the other device's pair screen (PWA <code>/pair</code> or local viewer <code>/cloud</code>) before it expires.</p>
-    </div>
     <div id="cloud-err" class="err"></div>
   </div>
   <div class="cloud-card cloud-stats-card">
@@ -3296,40 +3285,6 @@ function cloudScript(): string {
     });
   }
 
-  var genBtn = document.getElementById('gen-code-btn');
-  if (genBtn) {
-    genBtn.addEventListener('click', function(){
-      clearErr('cloud-err');
-      var orig = genBtn.textContent;
-      genBtn.disabled = true; genBtn.textContent = 'Generating…';
-      fetch('/api/sync/pair-code', { method: 'POST' })
-        .then(function(r){ return r.json().then(function(body){ return { ok: r.ok, body: body }; }); })
-        .then(function(res){
-          if (!res.ok) throw new Error(res.body.error || 'generate failed');
-          var wrap = document.getElementById('generated-code');
-          var val = document.getElementById('generated-code-value');
-          val.textContent = res.body.code;
-          wrap.hidden = false;
-        }).catch(function(e){
-          showErr('cloud-err', e.message);
-        }).finally(function(){
-          genBtn.disabled = false; genBtn.textContent = orig;
-        });
-    });
-  }
-
-  var copyBtn = document.getElementById('copy-code-btn');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', function(){
-      var val = document.getElementById('generated-code-value').textContent || '';
-      navigator.clipboard.writeText(val).then(function(){
-        var orig = copyBtn.textContent;
-        copyBtn.textContent = '✓ copied';
-        setTimeout(function(){ copyBtn.textContent = orig; }, 1500);
-      });
-    });
-  }
-
   function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
   function bytesHuman(n) {
     if (!Number.isFinite(n) || n <= 0) return '0 B';
@@ -3427,7 +3382,7 @@ function cloudScript(): string {
   // ---- Operator dashboard (v0.14+) ----
   // Renders the user-management panel iff /v1/admin/whoami returns
   // is_operator=true. Non-operator paired devices never see this section.
-  var opState = { selected: null, adding: false, mintedCode: null, toast: null, renaming: false, users: [] };
+  var opState = { selected: null, adding: false, toast: null, renaming: false, users: [] };
   function opShowErr(msg) {
     var e = document.getElementById('op-err');
     if (!e) return;
@@ -3491,7 +3446,6 @@ function cloudScript(): string {
         row.addEventListener('click', function(){
           opState.selected = opState.selected === u.id ? null : u.id;
           opState.adding = false;
-          opState.mintedCode = null;
           opState.toast = null;
           opState.renaming = false;
           renderOp();
@@ -3517,10 +3471,6 @@ function cloudScript(): string {
       var opCb = document.createElement('input'); opCb.type = 'checkbox'; opCb.id = 'new-op';
       opLabel.appendChild(opCb);
       opLabel.appendChild(document.createTextNode(' make this user an operator'));
-      var mintLabel = document.createElement('label'); mintLabel.className = 'cb';
-      var mintCb = document.createElement('input'); mintCb.type = 'checkbox'; mintCb.id = 'new-mint'; mintCb.checked = true;
-      mintLabel.appendChild(mintCb);
-      mintLabel.appendChild(document.createTextNode(' mint pair-code immediately'));
       var actions = document.createElement('div'); actions.className = 'op-actions';
       var createBtn = document.createElement('button'); createBtn.className = 'primary'; createBtn.type = 'button'; createBtn.textContent = 'Create user';
       var cancelBtn = document.createElement('button'); cancelBtn.type = 'button'; cancelBtn.textContent = 'Cancel';
@@ -3533,11 +3483,9 @@ function cloudScript(): string {
             id: id,
             display_name: disp || undefined,
             is_operator: opCb.checked,
-            mint_pair_code: mintCb.checked,
           });
           opState.adding = false;
           opState.selected = data.user.id;
-          opState.mintedCode = data.pair_code; // null if mint_pair_code=false
           opState.toast = "user '" + data.user.id + "' created";
           await opRefresh();
         } catch (e) { opShowErr(e.message || String(e)); }
@@ -3547,7 +3495,6 @@ function cloudScript(): string {
       addEl.appendChild(idField);
       addEl.appendChild(dispField);
       addEl.appendChild(opLabel);
-      addEl.appendChild(mintLabel);
       addEl.appendChild(actions);
     } else {
       addEl.hidden = true;
@@ -3607,14 +3554,6 @@ function cloudScript(): string {
           }
           detailEl.appendChild(grid);
 
-          if (opState.mintedCode && opState.mintedCode.user_id === u.id) {
-            var box = document.createElement('div'); box.className = 'op-code-box';
-            var bl = document.createElement('div'); bl.className = 'lbl'; bl.textContent = 'Pair code · expires ' + (opState.mintedCode.expires_at || '').replace('T',' ').slice(0,19);
-            var bv = document.createElement('div'); bv.className = 'code'; bv.textContent = opState.mintedCode.code;
-            var bh = document.createElement('div'); bh.className = 'hint'; bh.textContent = "Hand to " + u.display_name + " over a side channel (Signal, SMS, in-person).";
-            box.appendChild(bl); box.appendChild(bv); box.appendChild(bh);
-            detailEl.appendChild(box);
-          }
           if (opState.toast) {
             var t = document.createElement('div'); t.className = 'op-toast'; t.textContent = '✓ ' + opState.toast;
             detailEl.appendChild(t);
@@ -3626,22 +3565,12 @@ function cloudScript(): string {
           } else {
             var acts = document.createElement('div'); acts.className = 'op-actions';
             function mkBtn(label, cls, fn){ var b = document.createElement('button'); b.type='button'; if(cls) b.className=cls; b.textContent=label; b.addEventListener('click', fn); return b; }
-            acts.appendChild(mkBtn('↻ Mint pair-code', 'primary', async function(){
-              opShowErr('');
-              try {
-                var data = await opCall('POST', '/users/' + encodeURIComponent(u.id) + '/pair-code');
-                opState.mintedCode = data;
-                opState.toast = null;
-                renderOp();
-              } catch (e) { opShowErr(e.message || String(e)); }
-            }));
             acts.appendChild(mkBtn('✎ Rename', '', function(){ opState.renaming = true; renderOp(); }));
             acts.appendChild(mkBtn(u.is_operator ? '↓ Demote' : '↑ Promote', '', async function(){
               opShowErr('');
               try {
                 await opCall('PATCH', '/users/' + encodeURIComponent(u.id), { is_operator: !u.is_operator });
                 opState.toast = u.is_operator ? 'demoted from operator' : 'promoted to operator';
-                opState.mintedCode = null;
                 await opRefresh();
               } catch (e) { opShowErr(e.message || String(e)); }
             }));
@@ -3652,7 +3581,6 @@ function cloudScript(): string {
               try {
                 await opCall('DELETE', '/users/' + encodeURIComponent(u.id));
                 opState.toast = 'all devices revoked — data preserved';
-                opState.mintedCode = null;
                 await opRefresh();
               } catch (e) { opShowErr(e.message || String(e)); }
             }));
@@ -3665,7 +3593,6 @@ function cloudScript(): string {
                 var data = await opCall('DELETE', '/users/' + encodeURIComponent(u.id) + '?purge=1');
                 opState.toast = "purged " + (data.purged ? data.purged.notes + ' notes, ' + data.purged.assets + ' assets' : '');
                 opState.selected = null;
-                opState.mintedCode = null;
                 await opRefresh();
               } catch (e) { opShowErr(e.message || String(e)); }
             }));
@@ -3693,7 +3620,6 @@ function cloudScript(): string {
       if (addBtn) addBtn.addEventListener('click', function(){
         opState.adding = !opState.adding;
         opState.selected = null;
-        opState.mintedCode = null;
         opState.toast = null;
         renderOp();
       });

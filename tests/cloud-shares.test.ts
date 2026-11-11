@@ -19,13 +19,8 @@ beforeEach(async () => {
   baseUrl = `http://${server!.hostname}:${server!.port}`;
   publicBase = "https://share.example.com";
 
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "publisher", device_id: "01HXPUBDEVICE000000000XXXX" }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "publisher", deviceId: "01HXPUBDEVICE000000000XXXX" });
   token = ((await pairRes.json()) as { token: string }).token;
 
   // Seed two notes in two threads so scope tests have material.

@@ -76,23 +76,18 @@ with your subdomain. Folio-cloud binds `127.0.0.1:8081` by default — never
 expose it directly to the internet; always reach it through your TLS-
 terminating proxy.
 
-## Onboard a device
+## Onboard a box
+
+Only a NotiBox box pairs (sc-24120), and only with the key it was minted for:
 
 ```bash
-sudo -u folio /opt/folio/folio cloud pair-code
-# → prints a 6-digit code, 10 min TTL
+sudo -u folio /opt/folio/folio cloud pair-code --expect-key <box public key, base64 SPKI DER or PEM>
+# → prints a 6-digit code (10 min TTL) and "Bound key: sha256:<hex>"
 ```
 
-On the client device:
-
-```bash
-curl -X POST https://cloud.example.com/v1/auth/pair \
-  -d '{"code":"482910","device_name":"laptop"}'
-# → {"device_id":"...","token":"..."}
-```
-
-Stash the token somewhere safe (keychain, password manager). It's the only
-copy — server stores only its hash. Lost = pair a new device.
+On NotiBox this is automatic: `notibox-folio-cloud enable` gets the code from
+backplane and runs `folio sync pair`. The box signs every request with its key
+(no bearer). Phone/browser pairing and the cloud notebook app (PWA) are gone.
 
 ## Update to a newer release
 
@@ -137,7 +132,10 @@ FOLIO_CLOUD_PUBLIC_URL=http://127.0.0.1:18081 \
 bun bin/folio.ts cloud serve
 
 # Terminal 2 — pair this laptop against the LOCAL cloud (separate from prod).
-FOLIO_CLOUD_HOME=/tmp/folio-cloud-dev bun bin/folio.ts cloud pair-code
+# The code must be bound to the key this laptop will present (sc-24120):
+# its local ed25519 device key (folio uses ~/Folio/.device-key.pem as is).
+[ -f ~/Folio/.device-key.pem ] || (umask 077 && openssl genpkey -algorithm ed25519 -out ~/Folio/.device-key.pem)
+FOLIO_CLOUD_HOME=/tmp/folio-cloud-dev bun bin/folio.ts cloud pair-code --expect-key "$(openssl pkey -in ~/Folio/.device-key.pem -pubout)"
 # → prints a code
 
 # In a browser: http://127.0.0.1:4810/cloud → paste http://127.0.0.1:18081
@@ -145,12 +143,6 @@ FOLIO_CLOUD_HOME=/tmp/folio-cloud-dev bun bin/folio.ts cloud pair-code
 
 # Iterate: edit code, restart `bun bin/folio.ts cloud serve`, retry.
 ```
-
-For the PWA path specifically, point Safari/Chrome at `http://127.0.0.1:18081`
-(or `http://localhost:18081`) and walk the install + pair flow as if it
-were prod. Service workers register on `http://` only against localhost,
-so the same SW behavior gets tested. Skip Caddy + TLS — they're handled
-by your VPS reverse proxy anyway, not by Folio.
 
 When done:
 ```bash

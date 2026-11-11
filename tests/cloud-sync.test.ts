@@ -2,7 +2,7 @@ import { expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { closeCloudDb } from "../src/cloud/db";
+import { closeCloudDb, cloudDb } from "../src/cloud/db";
 
 let tmpDir: string;
 let server: { stop: () => void; port: number; hostname: string } | null = null;
@@ -10,15 +10,16 @@ let baseUrl: string;
 let token: string;
 
 async function pair(name = "test-device"): Promise<string> {
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const res = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: name }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const res = legacyPairResponse({ name: name });
   const body = (await res.json()) as { token: string };
   return body.token;
+}
+
+// sc-24120: no /v1/sync/pull any more — push results are read straight from
+// the cloud DB.
+function rows<T>(sql: string, ...params: any[]): T[] {
+  return cloudDb().query(sql).all(...params) as T[];
 }
 
 function note(uuid: string, slug = "n", thread = "smoke", overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -51,7 +52,7 @@ afterEach(() => {
   delete process.env.FOLIO_CLOUD_HOME;
 });
 
-test("push 5 notes + pull returns all + cursor advances", async () => {
+test("push 5 notes: all land in the cloud + cursor advances", async () => {
   const notes = Array.from({ length: 5 }, (_, i) =>
     note(`019e2110-0000-7000-8000-00000000000${i}`, `n${i}`, "smoke")
   );
@@ -65,30 +66,9 @@ test("push 5 notes + pull returns all + cursor advances", async () => {
   expect(pushBody.notes).toHaveLength(5);
   expect(pushBody.cursor).toBe(5);
 
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const pullBody = (await pullRes.json()) as { notes: unknown[]; cursor: number };
-  expect(pullBody.notes).toHaveLength(5);
-  expect(pullBody.cursor).toBe(5);
-});
-
-test("pull cursor: since=3 only returns later rows", async () => {
-  const notes = Array.from({ length: 5 }, (_, i) =>
-    note(`019e2110-0000-7000-8000-00000000010${i}`, `n${i}`, "t1")
-  );
-  await fetch(`${baseUrl}/v1/sync/push`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ notes }),
-  });
-
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=3`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const pullBody = (await pullRes.json()) as { notes: { server_seq: number }[]; cursor: number };
-  expect(pullBody.notes).toHaveLength(2);
-  expect(pullBody.notes.every((n) => n.server_seq > 3)).toBe(true);
+  const stored = rows<{ server_seq: number }>("SELECT server_seq FROM notes ORDER BY server_seq");
+  expect(stored).toHaveLength(5);
+  expect(stored[4]!.server_seq).toBe(5);
 });
 
 test("push is idempotent on same uuid (no duplicate)", async () => {
@@ -104,12 +84,9 @@ test("push is idempotent on same uuid (no duplicate)", async () => {
     body: JSON.stringify({ notes: [{ ...n, title: "Note dup updated" }] }),
   });
 
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const pullBody = (await pullRes.json()) as { notes: { uuid: string; title: string }[] };
-  expect(pullBody.notes).toHaveLength(1);
-  expect(pullBody.notes[0]!.title).toBe("Note dup updated");
+  const stored = rows<{ uuid: string; title: string }>("SELECT uuid, title FROM notes");
+  expect(stored).toHaveLength(1);
+  expect(stored[0]!.title).toBe("Note dup updated");
 });
 
 test("slug collision: different uuid, same thread+slug → rename with uuid6 suffix", async () => {
@@ -139,15 +116,12 @@ test("push stamps origin_device_id from authed device (overrides client claim)",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ notes: [n] }),
   });
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const pullBody = (await pullRes.json()) as { notes: { origin_device_id: string }[] };
-  expect(pullBody.notes[0]!.origin_device_id).not.toBe("totally-fake-id-from-client");
-  expect(pullBody.notes[0]!.origin_device_id).toMatch(/^[0-9a-f-]{36}$/);
+  const stored = rows<{ origin_device_id: string }>("SELECT origin_device_id FROM notes");
+  expect(stored[0]!.origin_device_id).not.toBe("totally-fake-id-from-client");
+  expect(stored[0]!.origin_device_id).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-test("tags round-trip on push + pull", async () => {
+test("tags land in the cloud on push", async () => {
   const n = note("019e2110-0000-7000-8000-000000000500", "tagged", "smoke", {
     tags: ["alpha", "beta", "gamma"],
   });
@@ -156,14 +130,11 @@ test("tags round-trip on push + pull", async () => {
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ notes: [n] }),
   });
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const pullBody = (await pullRes.json()) as { notes: { tags: string[] }[] };
-  expect(pullBody.notes[0]!.tags.sort()).toEqual(["alpha", "beta", "gamma"]);
+  const tags = rows<{ tag: string }>("SELECT tag FROM note_tags ORDER BY tag").map((r) => r.tag);
+  expect(tags).toEqual(["alpha", "beta", "gamma"]);
 });
 
-test("live entry push + pull preserves order and dedup", async () => {
+test("live entry push dedups on re-push", async () => {
   const noteUuid = "019e2110-0000-7000-8000-000000000600";
   await fetch(`${baseUrl}/v1/sync/push`, {
     method: "POST",
@@ -186,12 +157,8 @@ test("live entry push + pull preserves order and dedup", async () => {
     body: JSON.stringify({ live_entries: entries }),
   });
 
-  const pullRes = await fetch(`${baseUrl}/v1/sync/pull?since=0`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const body = (await pullRes.json()) as { live_entries: { id: string }[] };
-  expect(body.live_entries).toHaveLength(2);
-  expect(body.live_entries.map((e) => e.id).sort()).toEqual(["ent1", "ent2"]);
+  const stored = rows<{ id: string }>("SELECT id FROM live_entries ORDER BY ts");
+  expect(stored.map((e) => e.id)).toEqual(["ent1", "ent2"]);
 });
 
 test("asset upload + GET round-trip + hash mismatch rejected", async () => {

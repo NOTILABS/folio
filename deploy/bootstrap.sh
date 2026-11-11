@@ -132,11 +132,14 @@ systemctl enable --now folio-cloud
 sleep 1
 systemctl --no-pager status folio-cloud | head -10
 
-# ───── First pairing code ────────────────────────────────────────────────
+# ───── Pairing ───────────────────────────────────────────────────────────
+# sc-24120: a pairing code is always bound to the key of the box it pairs,
+# so there is no "first code" to print here. NotiBox backplane mints one per
+# box (`folio cloud pair-code --expect-key <box key>`) during
+# `notibox-folio-cloud enable`.
 
 echo ""
-echo "→ generating first pairing code…"
-sudo -u folio /opt/folio/folio cloud pair-code
+echo "→ pairing: codes are minted per box with --expect-key <box key> (no generic first code)"
 
 # ───── Reverse-proxy snippet ─────────────────────────────────────────────
 

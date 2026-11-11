@@ -34,13 +34,8 @@ beforeEach(async () => {
   await init();
   const { getOrCreateDeviceId } = await import("../src/core/config");
   selfDeviceId = getOrCreateDeviceId().id;
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: selfDeviceId }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test", deviceId: selfDeviceId });
   token = ((await pairRes.json()) as { token: string }).token;
   const { saveSyncState } = await import("../src/core/sync");
   saveSyncState({
@@ -235,70 +230,7 @@ test("public asset 404 for unknown (thread, filename)", async () => {
   expect(r.status).toBe(404);
 });
 
-test("pull-side asset download: foreign-origin note brings its asset bytes locally", async () => {
-  const { existsSync, readFileSync } = await import("node:fs");
-  const { extractAssetRefs, loadSyncState, syncOnce, pullAssets } = await import("../src/core/sync");
-  const { cloudDb } = await import("../src/cloud/db");
-  const { storeAsset } = await import("../src/cloud/sync");
-
-  // Simulate "another device" pushed a note + asset by inserting directly
-  // into the cloud DB (we're on the only paired device in this test, so
-  // can't use a second client; but the wire path is identical).
-  const otherDeviceId = "01HXOTHER0000000000000000000";
-  cloudDb().run(
-    `INSERT INTO devices (id, name, token_hash, paired_at) VALUES (?, 'other', 'no-token', ?)`,
-    [otherDeviceId, "2026-05-01T10:00:00Z"]
-  );
-
-  const assetBytes = new TextEncoder().encode("foreign-asset-bytes");
-  const assetHash = createHash("sha256").update(assetBytes).digest("hex");
-  storeAsset(assetHash, "remote.png", "shared-thread", assetBytes);
-
-  const seq = cloudDb()
-    .query<{ value: number }, []>("UPDATE server_seq SET value = value + 1 WHERE id = 1 RETURNING value")
-    .get()!.value;
-  cloudDb().run(
-    `INSERT INTO notes (uuid, slug, thread_id, title, type, theme, theme_profile,
-       body_html, plain_text, created_at, updated_at, expires_at, is_final, live,
-       owner_device_id, origin_device_id, word_count, summary, server_seq)
-     VALUES (?, ?, ?, ?, ?, 'linen', 'hosted', ?, '', ?, ?, NULL, 0, 0, NULL, ?, 0, NULL, ?)`,
-    [
-      "01HXFOREIGN001",
-      "from-other",
-      "shared-thread",
-      "From Other",
-      "research",
-      '<p>see this:</p><img src="/t/shared-thread/asset/remote.png" alt="x">',
-      "2026-05-12T09:00:00Z",
-      "2026-05-12T09:00:00Z",
-      otherDeviceId,
-      seq,
-    ]
-  );
-
-  // The asset isn't on this device yet.
-  const localPath = join(homeDir, "threads", "shared-thread", "assets", "remote.png");
-  expect(existsSync(localPath)).toBe(false);
-
-  // Sync — should pull the note AND download the asset bytes locally.
-  const r = await syncOnce(loadSyncState()!);
-  expect(r.pulled).toBe(1);
-  expect(r.assets_pulled).toBe(1);
-  expect(existsSync(localPath)).toBe(true);
-  const localBytes = readFileSync(localPath);
-  expect(new Uint8Array(localBytes)).toEqual(assetBytes);
-
-  // Re-sync: asset already on disk → no re-download. Same note replays
-  // through applyPulledNote (idempotent), so cursor doesn't matter.
-  const refs = extractAssetRefs(
-    '<img src="/t/shared-thread/asset/remote.png">'
-  );
-  const r2 = await pullAssets(loadSyncState()!, refs);
-  expect(r2.downloaded).toBe(0);
-  expect(r2.skipped).toBe(1);
-});
-
-test("pull-side asset download: own-origin notes don't trigger downloads", async () => {
+test("push uploads own assets; nothing is pulled back (no pull since sc-24120)", async () => {
   const { createNote } = await import("../src/core/storage");
   const { loadSyncState, syncOnce } = await import("../src/core/sync");
 
@@ -313,18 +245,7 @@ test("pull-side asset download: own-origin notes don't trigger downloads", async
   const r = await syncOnce(loadSyncState()!);
   expect(r.pushed).toBe(1);
   expect(r.assets_pushed).toBe(1);
-  // Own-echo skipped on pull → no foreign asset refs collected → no
-  // download attempt.
   expect(r.assets_pulled).toBe(0);
-});
-
-test("pull-side asset download: unsafe filename in body_html is filtered", async () => {
-  const { pullAssets, loadSyncState } = await import("../src/core/sync");
-  const r = await pullAssets(loadSyncState()!, [
-    { thread_id: "weird", filename: "../etc/passwd" },
-  ]);
-  expect(r.downloaded).toBe(0);
-  expect(r.skipped).toBe(1);
 });
 
 test("delete cascade: orphan asset bytes removed when last referrer goes", async () => {

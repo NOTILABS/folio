@@ -24,11 +24,9 @@
  */
 
 import { cloudDb } from "./db";
-import { subscribe as subscribeLiveStream } from "./sse-hub";
 import {
   authenticate,
   consumePairingCode,
-  createPairingCode,
   extractBearer,
   isPublicPath,
   listDevices,
@@ -42,13 +40,11 @@ import {
 } from "./auth";
 import {
   handlePush,
-  handlePull,
   storeAsset,
   readAsset,
   type PushPayload,
 } from "./sync";
-import { renderNotePage, renderStandaloneNote, renderSharedNotePage, renderSharedThreadPage, renderRecipientConfirm } from "./render";
-import { renderHome, renderPair, serviceWorkerJs, manifestJson, FOLIO_ICON_SVG, SW_VERSION } from "./pwa";
+import { renderStandaloneNote, renderSharedNotePage, renderSharedThreadPage, renderRecipientConfirm } from "./render";
 import {
   createShare,
   getShare,
@@ -66,7 +62,6 @@ import {
   createUser,
   patchUser,
   deleteUser,
-  mintPairCodeFor,
   AdminError,
 } from "./admin";
 import { createHash } from "node:crypto";
@@ -595,14 +590,12 @@ async function handleAdminRoute(
         id?: string;
         display_name?: string;
         is_operator?: boolean;
-        mint_pair_code?: boolean;
       };
       if (!body.id) return adminJson({ error: "id required" }, 400);
       const result = createUser({
         id: body.id,
         display_name: body.display_name,
         is_operator: body.is_operator,
-        mint_pair_code: body.mint_pair_code,
       });
       return adminJson(result);
     } catch (e) {
@@ -610,21 +603,12 @@ async function handleAdminRoute(
     }
   }
 
-  // /v1/admin/users/<id>[/pair-code]
-  const userMatch = path.match(/^\/v1\/admin\/users\/([^/]+)(?:\/(pair-code))?$/);
+  // /v1/admin/users/<id>. The /pair-code sub-route is gone (sc-24120): codes
+  // are minted only bound to a box key, by `folio cloud pair-code --expect-key`.
+  const userMatch = path.match(/^\/v1\/admin\/users\/([^/]+)$/);
   if (userMatch) {
     const targetId = decodeURIComponent(userMatch[1]!);
-    const sub = userMatch[2];
-
-    if (sub === "pair-code" && method === "POST") {
-      try {
-        return adminJson(mintPairCodeFor(targetId));
-      } catch (e) {
-        return adminErr(e);
-      }
-    }
-
-    if (!sub && method === "PATCH") {
+    if (method === "PATCH") {
       try {
         const body = (await req.json()) as {
           new_id?: string;
@@ -639,7 +623,7 @@ async function handleAdminRoute(
       }
     }
 
-    if (!sub && method === "DELETE") {
+    if (method === "DELETE") {
       try {
         const url = new URL(req.url);
         const purge = url.searchParams.get("purge") === "1";
@@ -682,13 +666,6 @@ function serverError(msg: string): Response {
   return json({ error: msg }, 500);
 }
 
-function jsonArray(s: string): string[] {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v.map(String) : [];
-  } catch { return []; }
-}
-
 async function readJsonBody<T>(req: Request): Promise<T> {
   const text = await req.text();
   if (!text) throw new Error("empty body");
@@ -728,11 +705,9 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
         return handleCapabilityRoute(req, path, method, publicUrl);
       }
 
-      // Auth: public paths skip; everything else needs a valid bearer.
-      // SSE live-stream is a special case: EventSource can't send custom
-      // headers (browser API), so the token rides in a query param. We
-      // accept either header or query param ONLY for that route, and only
-      // for that route — every other path stays bearer-header-only.
+      // Auth: public paths skip; everything else needs a valid bearer
+      // (header only — the query-param token of the PWA live-stream is gone,
+      // sc-24120).
       //
       // sc-24117: a request carrying x-folio-sig authenticates by device-key
       // signature instead (devices with a pinned key have no live bearer).
@@ -748,10 +723,7 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
           device = authenticateSigned(req, signed, rawBody);
           if (!device) return unauthorized();
         } else {
-          let token = extractBearer(req);
-          if (!token && path === "/v1/sync/live-stream") {
-            token = url.searchParams.get("token");
-          }
+          const token = extractBearer(req);
           if (!token) return unauthorized();
           device = authenticate(token);
           if (!device) return unauthorized();
@@ -764,51 +736,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
 
         if (path === "/v1/version") {
           return json({ name: "folio-cloud", version: pkg.version, public_url: publicUrl });
-        }
-
-        if (path === "/manifest.webmanifest") {
-          return new Response(JSON.stringify(manifestJson(publicUrl), null, 2), {
-            status: 200,
-            headers: {
-              "Content-Type": "application/manifest+json; charset=utf-8",
-              "Cache-Control": "public, max-age=300",
-            },
-          });
-        }
-
-        if (path === "/sw.js") {
-          return new Response(serviceWorkerJs(), {
-            status: 200,
-            headers: {
-              "Content-Type": "application/javascript; charset=utf-8",
-              "Service-Worker-Allowed": "/",
-              "Cache-Control": "no-cache",
-            },
-          });
-        }
-
-        if (path === "/icons/folio.svg") {
-          return new Response(FOLIO_ICON_SVG, {
-            status: 200,
-            headers: {
-              "Content-Type": "image/svg+xml; charset=utf-8",
-              "Cache-Control": "public, max-age=86400, immutable",
-            },
-          });
-        }
-
-        if (path === "/" && method === "GET") {
-          return new Response(renderHome(publicUrl), {
-            status: 200,
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-          });
-        }
-
-        if (path === "/pair" && method === "GET") {
-          return new Response(renderPair(publicUrl), {
-            status: 200,
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-          });
         }
 
         if (path === "/v1/auth/pair" && method === "POST") {
@@ -836,19 +763,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
               : json({ device_id: deviceId, token });
           } catch (e: any) {
             return badRequest(e?.message ?? "pairing failed");
-          }
-        }
-
-        // /n/:uuid — public JS shell. Reads bearer token from IDB client-side
-        // and fetches /raw/:uuid with auth. Outer page exposes nothing
-        // beyond the uuid that's already in the URL.
-        {
-          const m = path.match(/^\/n\/([0-9A-Za-z-]+)$/);
-          if (m && method === "GET") {
-            return new Response(renderNotePage(m[1]!, ""), {
-              status: 200,
-              headers: { "Content-Type": "text/html; charset=utf-8" },
-            });
           }
         }
 
@@ -926,18 +840,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
           }
         }
 
-        // /t/:thread_id — public JS shell, same renderer as /. JS reads
-        // location.pathname → /t/<id> and fetches /v1/feed?thread=<id>.
-        {
-          const m = path.match(/^\/t\/([^/]+)$/);
-          if (m && method === "GET") {
-            return new Response(renderHome(publicUrl), {
-              status: 200,
-              headers: { "Content-Type": "text/html; charset=utf-8" },
-            });
-          }
-        }
-
         // ----- Authed paths below -----
         if (!device) return unauthorized(); // belt-and-braces; isPublicPath gate above ensures this
 
@@ -986,16 +888,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
           if (adminResp) return adminResp;
         }
 
-        // Already-paired devices can request fresh pairing codes for
-        // onboarding additional devices within the SAME user account.
-        // Cross-user pairing is operator-only (CLI `folio cloud pair-code
-        // --user <other>`). Code carries device.userId so the new device
-        // joins the caller's account, never another's.
-        if (path === "/v1/auth/pair-code" && method === "POST") {
-          const { code, expiresAt, userId } = createPairingCode(device!.userId);
-          return json({ code, expires_at: expiresAt, user_id: userId });
-        }
-
         {
           const m = path.match(/^\/v1\/auth\/device\/([^/]+)$/);
           if (m && method === "DELETE") {
@@ -1018,75 +910,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
           const payload = await readJsonBody<PushPayload>(req);
           const result = handlePush(payload, device!);
           return json(result);
-        }
-
-        // SSE stream of live entries for a single note. Subscribers (PWA,
-        // CLI `curl -N …`) get fanout from handlePush whenever a fresh
-        // live_entry arrives for that uuid. No historical replay — the
-        // caller should fetch /raw/:uuid for the current state and use
-        // the stream for what's new SINCE the connection opened.
-        if (path === "/v1/sync/live-stream" && method === "GET") {
-          const noteUuid = url.searchParams.get("note_uuid");
-          if (!noteUuid) return badRequest("note_uuid query param required");
-          // Verify the note exists, belongs to caller's user, is live, not
-          // finalized. Cross-user subscribe attempts get the same "not found"
-          // as truly missing — avoids leaking whether a uuid exists.
-          const row = cloudDb()
-            .query<{ live: number; is_final: number; user_id: string }, [string]>(
-              "SELECT live, is_final, user_id FROM notes WHERE uuid = ?"
-            )
-            .get(noteUuid);
-          if (!row || row.user_id !== device!.userId) return notFound("note not found");
-          if (row.live !== 1) return badRequest("note is not a live note");
-          if (row.is_final === 1) return badRequest("note is finalized");
-
-          const stream = new ReadableStream({
-            start(controller) {
-              const enc = new TextEncoder();
-              // Initial "ready" so the client knows the connection is live.
-              controller.enqueue(enc.encode(":ok\n\n"));
-              const unsub = subscribeLiveStream(noteUuid, (frame) => {
-                try {
-                  // event: entry — matches what the local viewer emits, so
-                  // client code can be shared.
-                  const data = JSON.stringify(frame);
-                  controller.enqueue(enc.encode(`event: entry\nid: ${frame.id}\ndata: ${data}\n\n`));
-                } catch {
-                  // controller closed; unsubscribe handled by cancel below.
-                }
-              });
-              // Heartbeat every 25s — keeps proxies from idling out the
-              // connection on quiet streams (Caddy default is ~60s).
-              const heartbeat = setInterval(() => {
-                try { controller.enqueue(enc.encode(":hb\n\n")); } catch {}
-              }, 25_000);
-              (controller as any)._folioCleanup = () => {
-                clearInterval(heartbeat);
-                unsub();
-              };
-            },
-            cancel() {
-              // Cancel fires when the client disconnects. Tear down the
-              // subscription so the channel can be GC'd.
-              const ctrl = this as any;
-              if (ctrl._folioCleanup) ctrl._folioCleanup();
-            },
-          });
-          return new Response(stream, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/event-stream; charset=utf-8",
-              "Cache-Control": "no-cache, no-transform",
-              "X-Accel-Buffering": "no", // disable buffering at nginx if present
-              Connection: "keep-alive",
-            },
-          });
-        }
-
-        if (path === "/v1/sync/pull" && method === "GET") {
-          const since = Number(url.searchParams.get("since") ?? 0);
-          if (!Number.isFinite(since) || since < 0) return badRequest("invalid since cursor");
-          return json(handlePull(since, device!));
         }
 
         // ---- Shares (capability URL admin) ----
@@ -1240,79 +1063,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
           });
         }
 
-        if (path === "/v1/feed" && method === "GET") {
-          // Lightweight list for the PWA home screen — no body_html.
-          // Supports two optional filters:
-          //   ?q=<query>     — case-insensitive LIKE across title + plain_text
-          //   ?thread=<id>   — exact thread_id match
-          // Always scoped to caller's user_id. Cross-user notes invisible.
-          const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-          const q = (url.searchParams.get("q") ?? "").trim();
-          const thread = (url.searchParams.get("thread") ?? "").trim();
-          const where: string[] = ["user_id = ?"];
-          const params: any[] = [device!.userId];
-          if (q) {
-            // Tokenize on whitespace; require every token match in title OR plain_text.
-            // ESCAPE \\ for LIKE so a literal % or _ from the user doesn't wildcard.
-            for (const tok of q.split(/\s+/).filter(Boolean)) {
-              where.push(
-                "(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(plain_text) LIKE ? ESCAPE '\\')"
-              );
-              const needle = "%" + tok.toLowerCase().replace(/[\\%_]/g, "\\$&") + "%";
-              params.push(needle, needle);
-            }
-          }
-          if (thread) {
-            where.push("thread_id = ?");
-            params.push(thread);
-          }
-          const whereClause = `WHERE ${where.join(" AND ")}`;
-          const sql =
-            `SELECT uuid, slug, title, type, theme, thread_id, created_at, updated_at, is_final, live` +
-            ` FROM notes ${whereClause} ORDER BY created_at DESC LIMIT ?`;
-          const notes = cloudDb()
-            .query<
-              {
-                uuid: string;
-                slug: string;
-                title: string;
-                type: string;
-                theme: string;
-                thread_id: string;
-                created_at: string;
-                updated_at: string;
-                is_final: number;
-                live: number;
-              },
-              any[]
-            >(sql)
-            .all(...params, limit);
-          const threads = cloudDb()
-            .query<{ thread_id: string; count: number; latest: string }, [string]>(
-              `SELECT thread_id, COUNT(*) AS count, MAX(created_at) AS latest
-                 FROM notes WHERE user_id = ? GROUP BY thread_id ORDER BY latest DESC LIMIT 50`
-            )
-            .all(device!.userId);
-          return json({
-            notes: notes.map((n) => ({
-              uuid: n.uuid,
-              slug: n.slug,
-              title: n.title,
-              type: n.type,
-              theme: n.theme,
-              thread_id: n.thread_id,
-              created_at: n.created_at,
-              updated_at: n.updated_at,
-              is_final: n.is_final === 1,
-              live: n.live === 1,
-            })),
-            threads,
-            query: q || undefined,
-            thread: thread || undefined,
-            sw_version: SW_VERSION,
-          });
-        }
-
         {
           const m = path.match(/^\/v1\/sync\/assets\/([a-f0-9]{64})$/);
           if (m) {
@@ -1350,128 +1100,6 @@ export function startCloudServer(opts: CloudServerOptions = {}): ReturnType<type
                 },
               });
             }
-          }
-        }
-
-        // (/n/:uuid handled above as public route — see comment near auth gate.)
-
-        {
-          const m = path.match(/^\/raw\/([0-9A-Za-z-]+)$/);
-          if (m && method === "GET") {
-            // Scoped to caller's user — cross-user /raw/<uuid> requests get
-            // the same "not found" as a truly missing uuid.
-            const row = cloudDb()
-              .query<
-                { uuid: string; title: string; theme: string; type: string; body_html: string; live: number; is_final: number; inline_render: number },
-                [string, string]
-              >(
-                "SELECT uuid, title, theme, type, body_html, live, is_final, inline_render FROM notes WHERE uuid = ? AND user_id = ?"
-              )
-              .get(m[1]!, device!.userId);
-            if (!row) return notFound("note not found");
-            let bodyHtml = row.body_html;
-            // v0.18 iteration notes: cloud renders the same gallery the
-            // local viewer does, but read-only — pick happens on the
-            // device that owns the note (no /iter/pick endpoint on cloud).
-            // We share the renderer + state-compute helpers with the
-            // local viewer; entries come from `live_entries` mirrored
-            // up by sync. Skip when finalized — final iteration notes
-            // have body_html compiled in Phase 6 and render like any
-            // static note.
-            if (row.type === "iteration" && row.is_final === 0) {
-              const cloudEntries = cloudDb()
-                .query<{ id: string; ts: string; content_html: string; tags_json: string; refs_json: string; source_ref: string | null }, [string]>(
-                  "SELECT id, ts, content_html, tags_json, refs_json, source_ref FROM live_entries WHERE note_uuid = ? ORDER BY ts ASC"
-                )
-                .all(row.uuid)
-                .map((e) => ({
-                  id: e.id,
-                  ts: e.ts,
-                  content_html: e.content_html,
-                  plain: "",
-                  tags: jsonArray(e.tags_json),
-                  refs: jsonArray(e.refs_json),
-                  source_ref: e.source_ref ?? undefined,
-                }));
-              const { computeIterationState } = await import("../core/iteration");
-              const { renderIterationRaw, extractChrome } = await import("../viewer/iteration-render");
-              const state = computeIterationState(row.uuid, cloudEntries as any, false);
-              const chrome = extractChrome(bodyHtml);
-              const iterFragment = renderIterationRaw({
-                noteId: row.uuid,
-                title: row.title,
-                chromeHtml: chrome,
-                state,
-                readonly: true,
-              });
-              bodyHtml = bodyHtml.replace(
-                /(<article[^>]*data-folio-content[^>]*>)([\s\S]*?)(<\/article>)/,
-                (_m, open, _content, close) => `${open}${iterFragment}${close}`
-              );
-            }
-            // v0.17 inline-rendered live notes: splice the cloud-side
-            // live_entries into <section data-folio-live-feed> on every
-            // serve. New entries during the session arrive via the PWA
-            // shell's SSE → postMessage forward (same bootstrap script
-            // appended below).
-            if (row.live === 1 && row.inline_render === 1 && row.is_final === 0) {
-              const cloudEntries = cloudDb()
-                .query<{ id: string; ts: string; content_html: string; tags_json: string; occurred_at: string | null; refs_json: string; importance: number | null; source_ref: string | null }, [string]>(
-                  "SELECT id, ts, content_html, tags_json, occurred_at, refs_json, importance, source_ref FROM live_entries WHERE note_uuid = ? ORDER BY ts ASC"
-                )
-                .all(row.uuid)
-                .map((e) => ({
-                  id: e.id,
-                  ts: e.ts,
-                  content_html: e.content_html,
-                  tags: jsonArray(e.tags_json),
-                  occurred_at: e.occurred_at,
-                  refs: jsonArray(e.refs_json),
-                  importance: e.importance,
-                  source_ref: e.source_ref,
-                }));
-              const { compileRendered } = await import("../core/live");
-              const { renderFeedHtml, spliceFeedIntoBody } = await import("../core/feed-render");
-              const compiled = compileRendered(cloudEntries as any);
-              bodyHtml = spliceFeedIntoBody(bodyHtml, renderFeedHtml(compiled));
-            }
-            // Expose live/is_final/inline via response headers so the
-            // /n/:uuid PWA shell can decide whether to open SSE + whether
-            // to postMessage entries down to the body iframe.
-            const headers: Record<string, string> = {
-              ...rawNoteHeaders(),
-              "X-Folio-Live": row.live === 1 ? "1" : "0",
-              "X-Folio-Final": row.is_final === 1 ? "1" : "0",
-              "X-Folio-Inline": row.inline_render === 1 ? "1" : "0",
-            };
-            let html = renderStandaloneNote({
-              title: row.title,
-              theme: row.theme,
-              bodyHtml,
-              userId: device!.userId,
-            });
-            // Append the bootstrap script (matches viewer/server.ts pattern).
-            if (row.live === 1 && row.inline_render === 1 && row.is_final === 0) {
-              const { INLINE_FEED_BOOTSTRAP_JS } = await import("../core/feed-render");
-              html = html.replace("</body>", `<script>${INLINE_FEED_BOOTSTRAP_JS}</script></body>`);
-            }
-            return new Response(html, { status: 200, headers });
-          }
-        }
-
-        {
-          // Authed JSON thread listing — scoped to caller's user. The
-          // earlier public /t/:thread_id route (above the auth gate) returns
-          // the HTML shell for any caller; this JSON variant runs only when
-          // a bearer token reached the authed block.
-          const m = path.match(/^\/t\/([^/]+)$/);
-          if (m && method === "GET") {
-            const notes = cloudDb()
-              .query<{ uuid: string; title: string; created_at: string }, [string, string]>(
-                "SELECT uuid, title, created_at FROM notes WHERE thread_id = ? AND user_id = ? ORDER BY created_at DESC"
-              )
-              .all(m[1]!, device!.userId);
-            return json({ thread_id: m[1], notes });
           }
         }
 

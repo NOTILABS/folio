@@ -31,13 +31,8 @@ beforeEach(async () => {
   await init();
   const { saveConfig, loadConfig, getOrCreateDeviceId } = await import("../src/core/config");
   await saveConfig({ ...(await loadConfig()), auto_sync: false });
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: getOrCreateDeviceId().id }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test", deviceId: getOrCreateDeviceId().id });
   token = ((await pairRes.json()) as { token: string }).token;
   const { saveSyncState } = await import("../src/core/sync");
   saveSyncState({

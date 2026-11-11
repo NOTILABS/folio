@@ -24,13 +24,8 @@ beforeEach(async () => {
   await init();
   const { getOrCreateDeviceId } = await import("../src/core/config");
   selfDeviceId = getOrCreateDeviceId().id;
-  const { createPairingCode } = await import("../src/cloud/auth");
-  const { code } = createPairingCode();
-  const pairRes = await fetch(`${baseUrl}/v1/auth/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, device_name: "test", device_id: selfDeviceId }),
-  });
+  const { legacyPairResponse } = await import("./_cloud-device");
+  const pairRes = legacyPairResponse({ name: "test", deviceId: selfDeviceId });
   token = ((await pairRes.json()) as { token: string }).token;
   const { saveSyncState } = await import("../src/core/sync");
   saveSyncState({
@@ -170,69 +165,9 @@ test("CLI folio delete: happy path with --yes bypasses prompt", async () => {
   expect(existsSync(join(homeDir, ".trash", note.id, "note.html"))).toBe(true);
 });
 
-test("cross-device tombstone: foreign device's delete propagates to this device via pull", async () => {
-  // Setup: two devices share a cloud. This device pairs as "selfDevice".
-  // We simulate device A pushing a note, then DELETING it, then verify
-  // this device's pull picks up the tombstone and removes the local copy.
-  const { createNote } = await import("../src/core/storage");
-  const { loadSyncState, syncOnce } = await import("../src/core/sync");
-  const { handlePush } = await import("../src/cloud/sync");
-  const { getNoteMeta } = await import("../src/core/storage");
-
-  // Local note from another (foreign) device, simulated by direct cloud push.
-  const foreignDeviceId = "01HXOTHER0000000000000000XX";
-  const foreignUuid = "01HXTOMB000000000000000A";
-  // Both devices share user 'default' in this test (single-tenant case).
-  const foreignDevice = {
-    id: foreignDeviceId,
-    name: "foreign",
-    userId: "default",
-    pairedAt: "2026-05-13T09:00:00Z",
-    lastSeenAt: null,
-  } as const;
-  handlePush(
-    {
-      notes: [{
-        uuid: foreignUuid,
-        slug: "foreign-doomed",
-        thread_id: "tombstones",
-        title: "Foreign doomed note",
-        type: "research",
-        body_html: "<p>about to be deleted on the foreign device</p>",
-        created_at: "2026-05-13T10:00:00Z",
-      }],
-    },
-    foreignDevice,
-  );
-
-  // Pull on this device — note appears locally.
-  const state = loadSyncState()!;
-  await syncOnce(state);
-  expect(getNoteMeta(foreignUuid)).not.toBeNull();
-  const localPath = getNoteMeta(foreignUuid)!.path;
-  expect(existsSync(join(homeDir, localPath))).toBe(true);
-
-  // Foreign device deletes the note (server-side: hard-DELETE notes row +
-  // INSERT tombstone). syncOnce on this device should apply.
-  handlePush(
-    { deletes: [foreignUuid] },
-    foreignDevice,
-  );
-
-  const r = await syncOnce(state);
-  expect(r.deletes_applied).toBe(1);
-
-  // Local row is gone from active set (getNoteMeta filters status='active').
-  expect(getNoteMeta(foreignUuid)).toBeNull();
-  // File moved to .trash/<uuid>/note.html — same path as a manual delete.
-  expect(existsSync(join(homeDir, ".trash", foreignUuid, "note.html"))).toBe(true);
-});
-
-test("tombstone: own-echo skipped (pulling back a delete we initiated)", async () => {
+test("delete push: second sync after a local delete is a no-op", async () => {
   // Create + sync own note, then delete locally + sync, then sync AGAIN —
-  // the tombstone we created on the cloud comes back via pull with
-  // origin=self. applyPulledTombstone should skip (file's already trashed
-  // locally; double-apply would be a no-op but we want to skip cleanly).
+  // nothing comes back (no pull since sc-24120) and the note stays gone.
   const { createNote, getNoteMeta, deleteNote } = await import("../src/core/storage");
   const { loadSyncState, syncOnce } = await import("../src/core/sync");
 
@@ -249,7 +184,6 @@ test("tombstone: own-echo skipped (pulling back a delete we initiated)", async (
   expect(r1.deleted).toBe(1);
   expect(r1.deletes_applied).toBe(0); // own delete, not via tombstone
 
-  // Second sync — the tombstone IS in pull response but origin matches self.
   const r2 = await syncOnce(loadSyncState()!);
   expect(r2.deletes_applied).toBe(0);
   expect(getNoteMeta(note.id)).toBeNull(); // still gone, idempotent

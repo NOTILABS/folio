@@ -1,50 +1,30 @@
 /**
- * Sync daemon — bidirectional push/pull between a device's local ~/Folio/ and
- * a Folio Cloud relay (src/cloud/server.ts). W2 of the cloud-mvp sprint.
+ * Sync daemon — one-way push from a device's local ~/Folio/ to a Folio Cloud
+ * relay (src/cloud/server.ts). Since sc-24120 the cloud has no pull: it is a
+ * publish relay, and a NotiBox box (`sync_scope: "shared"`) pushes only the
+ * snapshot of what it publishes.
  *
  * Boundaries:
- *   - This module owns the WIRE PROTOCOL with the cloud (push/pull JSON
- *     payloads, asset hashing, cursors) and the SYNC STATE file.
+ *   - This module owns the WIRE PROTOCOL with the cloud (push JSON payloads,
+ *     asset hashing) and the SYNC STATE file.
  *   - It does NOT own the daemon loop, signal handling, or CLI flags — those
  *     live in src/cli/commands/sync.ts.
  *
- * Append-only data model carries 80% of the multi-writer story for free:
- *   - Notes are immutable HTML files → no edit conflicts ever.
- *   - Note IDs are ULIDs assigned client-side at create → cross-device unique.
- *   - Tags are sets → union merge.
- *   - Live entries are content-addressed by (note_id, entry_id) on the cloud
- *     side → idempotent re-push.
- *
  * What sync handles explicitly:
- *   - Own-echo: pulled notes whose origin_device_id == self are skipped.
  *   - Slug collisions: server rewrites slug on conflict and returns the
  *     canonical name; we rename the local .html file + update the DB row.
- *   - Cursor: monotonic int from cloud's server_seq. Stored per-remote in
- *     ~/Folio/.sync-state.json.
- *   - Asset bytes: push (writer→cloud) scans body_html for asset refs and
- *     uploads via /v1/sync/assets/<hash>; pull (cloud→reader) scans pulled
- *     body_html and downloads missing bytes via the public /t/<id>/asset/
- *     endpoint. Pull-side download is idempotent: skip if the local file
- *     already exists with non-zero size.
- *
- * What we DO NOT sync in W2 MVP:
- *   - Finalize / expiry / cleanup state changes after the initial push.
- *     Today, finalize on device A doesn't propagate to device B. Pickup
- *     when the user reports it as painful.
+ *   - Asset bytes: push scans body_html for asset refs and uploads via
+ *     /v1/sync/assets/<hash>.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { db } from "./db";
 import { cloudFetch, type KeyAlg } from "./cloud-auth";
-import { folioRoot, threadsDir, threadAssetsDir, getOrCreateDeviceId, configPath, isSafeAssetFilename, loadConfig } from "./config";
-import { renderNote } from "./templates";
-import { getTheme } from "./themes";
-import { plNormalize } from "./slug";
+import { folioRoot, threadAssetsDir, getOrCreateDeviceId, isSafeAssetFilename, loadConfig } from "./config";
 import { extractText } from "./text";
 import { entriesPath, readEntries } from "./live";
-import type { LiveEntry } from "./types";
 
 // ----- State file -----
 
@@ -389,65 +369,6 @@ interface PushAcceptedResp {
   cursor: number;
 }
 
-interface PullResp {
-  notes: PullNote[];
-  live_entries: PullLiveEntry[];
-  tombstones?: PullTombstone[]; // Optional for back-compat with older cloud builds
-  assets: unknown[];
-  cursor: number;
-}
-
-interface PullTombstone {
-  uuid: string;
-  thread_id: string;
-  origin_device_id: string | null;
-  deleted_at: string;
-  server_seq: number;
-}
-
-interface PullNote {
-  uuid: string;
-  slug: string;
-  thread_id: string;
-  title: string;
-  type: string;
-  theme: string;
-  theme_profile: string;
-  body_html: string;
-  plain_text: string;
-  created_at: string;
-  updated_at: string;
-  expires_at: string | null;
-  is_final: 0 | 1;
-  live: 0 | 1;
-  owner_device_id: string | null;
-  origin_device_id: string;
-  inline_render?: 0 | 1;
-  /** v0.29: optional — older cloud builds don't send these. Default to
-   *  unpinned on the consumer side. */
-  is_pinned?: 0 | 1;
-  pinned_at?: string | null;
-  /** v0.30.1: optional — older cloud builds don't send it; default null. */
-  superseded_by?: string | null;
-  tags: string[];
-  summary: string | null;
-  word_count: number;
-  server_seq: number;
-}
-
-interface PullLiveEntry {
-  id: string;
-  note_uuid: string;
-  ts: string;
-  content_html: string;
-  tags: string[];
-  occurred_at: string | null;
-  refs: string[];
-  importance: number | null;
-  source_ref: string | null;
-  server_seq: number;
-}
-
 // ----- Push step -----
 
 export interface SyncStepResult {
@@ -737,282 +658,6 @@ export async function pushLiveEntries(
 
   state.last_live_pushed = lastByNote;
   return allEntries.length;
-}
-
-// ----- Asset pull -----
-
-/**
- * For each (thread_id, filename) pair, ensure the bytes live at
- * ~/Folio/threads/<thread>/assets/<filename>. Hits the cloud's public
- * `/t/<thread>/asset/<file>` endpoint — no bearer header needed (the route
- * is public for sub-resource fetches from sandboxed iframes; we benefit
- * here from the same property).
- *
- * Idempotent: existing non-empty files are left alone. Filename safety is
- * checked before any disk write (mirrors push-side guard against path
- * traversal via crafted body_html refs). Network/disk errors on a single
- * asset are logged-via-skip and don't fail the rest of the batch.
- */
-export async function pullAssets(
-  state: SyncState,
-  refs: AssetRef[]
-): Promise<{ downloaded: number; skipped: number }> {
-  let downloaded = 0;
-  let skipped = 0;
-  for (const r of refs) {
-    if (!isSafeAssetFilename(r.filename)) { skipped++; continue; }
-    const dir = threadAssetsDir(r.thread_id);
-    const abs = join(dir, r.filename);
-    try {
-      const st = statSync(abs);
-      if (st.size > 0) { skipped++; continue; }
-    } catch {
-      // Missing — proceed to download.
-    }
-    let res: Response;
-    try {
-      res = await fetch(
-        `${state.remote}/t/${encodeURIComponent(r.thread_id)}/asset/${encodeURIComponent(r.filename)}`
-      );
-    } catch {
-      skipped++;
-      continue;
-    }
-    if (!res.ok) { skipped++; continue; }
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await res.arrayBuffer());
-    } catch {
-      skipped++;
-      continue;
-    }
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = `${abs}.tmp`;
-    try {
-      writeFileSync(tmp, bytes);
-      renameSync(tmp, abs);
-      downloaded++;
-    } catch {
-      skipped++;
-    }
-  }
-  return { downloaded, skipped };
-}
-
-// ----- Pull step -----
-
-export async function pullNotes(state: SyncState, selfDeviceId: string): Promise<{ pulled: number; live_pulled: number; deletes_applied: number; assets_pulled: number }> {
-  const url = `${state.remote}/v1/sync/pull?since=${state.last_pulled_seq}`;
-  const resp = await http<PullResp>("GET", url, state);
-  if (!resp) throw new Error("pull: empty response");
-
-  let pulled = 0;
-  // Collect asset refs from every foreign-origin note we apply, so we can
-  // batch-download bytes after the note files land. Deduped by (thread,
-  // filename) inside pullAssets — extractAssetRefs already dedupes per note,
-  // and assets are content-addressed enough that re-fetching across notes
-  // would just be wasted bytes.
-  const foreignAssetRefs: AssetRef[] = [];
-  const foreignSeen = new Set<string>();
-  for (const n of resp.notes) {
-    // Skip own echo — we know what we sent.
-    if (n.origin_device_id === selfDeviceId) continue;
-    await applyPulledNote(n);
-    pulled++;
-    for (const r of extractAssetRefs(n.body_html)) {
-      const key = `${r.thread_id}/${r.filename}`;
-      if (foreignSeen.has(key)) continue;
-      foreignSeen.add(key);
-      foreignAssetRefs.push(r);
-    }
-  }
-  const assetPull = foreignAssetRefs.length > 0
-    ? await pullAssets(state, foreignAssetRefs)
-    : { downloaded: 0, skipped: 0 };
-
-  let live_pulled = 0;
-  for (const e of resp.live_entries) {
-    // Determine owner of the parent note. If it's ours (own-echo of our own
-    // entry), skip. Otherwise append to local jsonl with dedup.
-    const own = db()
-      .query<{ origin_device_id: string | null }, [string]>(
-        "SELECT origin_device_id FROM notes WHERE id = ?"
-      )
-      .get(e.note_uuid);
-    if (own && own.origin_device_id === selfDeviceId) continue;
-    if (applyPulledLiveEntry(e)) live_pulled++;
-  }
-
-  // Apply tombstones: foreign devices deleted these notes; mirror locally so
-  // the laptop's view matches the cloud truth. Own deletes propagated via
-  // pushDeletes already moved the file to .trash and flipped status, so
-  // re-applying is a no-op (storage.deleteNote returns not-found gracefully).
-  let deletes_applied = 0;
-  for (const t of resp.tombstones ?? []) {
-    if (t.origin_device_id === selfDeviceId) continue; // own echo
-    const { deleteNote } = await import("./storage");
-    const res = deleteNote(t.uuid);
-    if (res.ok) deletes_applied++;
-  }
-
-  state.last_pulled_seq = resp.cursor;
-  return { pulled, live_pulled, deletes_applied, assets_pulled: assetPull.downloaded };
-}
-
-async function applyPulledNote(n: PullNote): Promise<void> {
-  // 1. Render full HTML for local viewer consumption.
-  const themeObj = await getTheme(n.theme);
-  if (!themeObj) {
-    // Theme missing locally — fall back to linen so the file still renders.
-    const fallback = await getTheme("linen");
-    if (!fallback) throw new Error(`Neither requested theme '${n.theme}' nor 'linen' found locally`);
-  }
-  const theme_css = themeObj ? themeObj.css : "";
-  const fullHtml = renderNote({
-    id: n.uuid,
-    type: n.type as any,
-    title: n.title,
-    body_html: n.body_html,
-    theme: n.theme,
-    theme_css,
-    theme_profile: (n.theme_profile as any) ?? "hosted",
-    tags: n.tags,
-    thread_id: n.thread_id,
-    created: n.created_at,
-    updated: n.updated_at,
-    is_final: !!n.is_final,
-  });
-
-  // 2. Resolve local slug, defending against conflicts. The cloud may send a
-  //    note whose (thread, slug) collides with an EXISTING local note that
-  //    was created here before sync — local createNote couldn't know about
-  //    the foreign one. Mirror the server-side rule: append <uuid6> suffix.
-  //    Idempotent: a re-pull of the same uuid keeps the same renamed slug.
-  let slug = n.slug;
-  const taken = db()
-    .query<{ id: string }, [string, string]>(
-      "SELECT id FROM notes WHERE thread_id = ? AND slug = ? AND id != ?"
-    )
-    .get(n.thread_id, slug, n.uuid);
-  if (taken) {
-    slug = `${n.slug}-${n.uuid.replace(/-/g, "").slice(0, 6).toLowerCase()}`;
-  }
-
-  // 3. Write file. Directory tree is per-thread.
-  const targetDir = join(threadsDir(), n.thread_id);
-  if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
-  const relPath = join("threads", n.thread_id, `${slug}.html`);
-  const absPath = join(folioRoot(), relPath);
-  const tmpPath = `${absPath}.tmp`;
-  writeFileSync(tmpPath, fullHtml, "utf-8");
-  renameSync(tmpPath, absPath);
-
-  // 3. Upsert into DB.
-  const stats = extractText(n.body_html);
-  const d = db();
-  d.transaction(() => {
-    d.run(
-      `INSERT INTO notes (
-         id, slug, path, title, type, theme, theme_profile, thread_id,
-         is_final, created, updated, expires_at, word_count, summary, status,
-         live, last_entry_at, origin_device_id, owner_device_id, inline_render,
-         is_pinned, pinned_at, superseded_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         slug = excluded.slug,
-         path = excluded.path,
-         title = excluded.title,
-         type = excluded.type,
-         theme = excluded.theme,
-         theme_profile = excluded.theme_profile,
-         thread_id = excluded.thread_id,
-         is_final = excluded.is_final,
-         updated = excluded.updated,
-         expires_at = excluded.expires_at,
-         word_count = excluded.word_count,
-         summary = excluded.summary,
-         live = excluded.live,
-         origin_device_id = excluded.origin_device_id,
-         owner_device_id = excluded.owner_device_id,
-         inline_render = excluded.inline_render,
-         is_pinned = excluded.is_pinned,
-         pinned_at = excluded.pinned_at,
-         superseded_by = excluded.superseded_by`,
-      [
-        n.uuid,
-        slug,
-        relPath,
-        n.title,
-        n.type,
-        n.theme,
-        n.theme_profile,
-        n.thread_id,
-        n.is_final ? 1 : 0,
-        n.created_at,
-        n.updated_at,
-        n.expires_at,
-        n.word_count,
-        n.summary,
-        n.live ? 1 : 0,
-        n.origin_device_id,
-        n.owner_device_id,
-        (n.inline_render ?? 0) ? 1 : 0,
-        (n.is_pinned ?? 0) ? 1 : 0,
-        n.pinned_at ?? null,
-        n.superseded_by ?? null,
-      ]
-    );
-    // Tag set replace.
-    d.run("DELETE FROM tags WHERE note_id = ?", [n.uuid]);
-    for (const tag of n.tags) {
-      d.run("INSERT OR IGNORE INTO tags (note_id, tag) VALUES (?, ?)", [n.uuid, tag]);
-    }
-    // FTS upsert.
-    d.run("DELETE FROM notes_fts WHERE id = ?", [n.uuid]);
-    d.run(
-      "INSERT INTO notes_fts (id, title, headings, body, tags) VALUES (?, ?, ?, ?, ?)",
-      [
-        n.uuid,
-        plNormalize(n.title),
-        plNormalize(stats.headings),
-        plNormalize(stats.body),
-        plNormalize(n.tags.join(" ")),
-      ]
-    );
-  })();
-}
-
-function applyPulledLiveEntry(e: PullLiveEntry): boolean {
-  // Need the note's local path to find its sidecar jsonl.
-  const note = db()
-    .query<{ path: string }, [string]>("SELECT path FROM notes WHERE id = ?")
-    .get(e.note_uuid);
-  if (!note) {
-    // Entry arrived before its parent note. Cloud's monotonic seq should
-    // prevent this, but be defensive: skip silently — entry will reappear
-    // on next pull (cursor doesn't advance for this entry until note lands).
-    return false;
-  }
-  const jsonl = entriesPath(join(folioRoot(), note.path));
-  // Dedup: skip if entry id already present in jsonl.
-  if (existsSync(jsonl)) {
-    const existing = readEntries(jsonl);
-    if (existing.some((x) => x.id === e.id)) return false;
-  } else {
-    if (!existsSync(dirname(jsonl))) mkdirSync(dirname(jsonl), { recursive: true });
-  }
-  const entry: LiveEntry = {
-    id: e.id,
-    ts: e.ts,
-    content_html: e.content_html,
-    tags: e.tags,
-  };
-  if (e.occurred_at) entry.occurred_at = e.occurred_at;
-  if (e.refs && e.refs.length > 0) entry.refs = e.refs;
-  if (e.importance != null) entry.importance = e.importance as 1 | 2 | 3 | 4 | 5;
-  if (e.source_ref) entry.source_ref = e.source_ref;
-  appendFileSync(jsonl, JSON.stringify(entry) + "\n", "utf-8");
-  return true;
 }
 
 // ----- Shared sync scope (sc-24117) -----
@@ -1311,11 +956,9 @@ export async function syncOnce(state: SyncState): Promise<SyncStepResult> {
   if (cfg.sync_scope === "shared") {
     return syncOnceShared(state, self.id);
   }
-  // Push first, pull second. Reasoning: if a local note collides with a
-  // remote note on (thread, slug), pushing first lets the server return a
-  // canonical_slug and we rename locally. The subsequent pull won't conflict
-  // because our local slug has changed. (applyPulledNote also handles the
-  // reverse case defensively, but this ordering avoids the dance when it can.)
+  // sc-24120: the cloud has no pull any more — this mode only pushes.
+  // Every NotiBox box runs `sync_scope: "shared"`; "all" is left for a
+  // non-box client and mirrors its notes up one way.
   const pushR = await pushNotes(state, self.id);
   const liveR = await pushLiveEntries(state, self.id);
   const deletedR = await pushDeletes(state, self.id);
@@ -1323,18 +966,17 @@ export async function syncOnce(state: SyncState): Promise<SyncStepResult> {
   // brand-new heads) but the full-payload re-push is order-independent
   // anyway thanks to INSERT…ON CONFLICT on the cloud.
   const supersededR = await pushSupersedes(state, self.id);
-  const pullR = await pullNotes(state, self.id);
   saveSyncState(state);
   return {
-    pulled: pullR.pulled,
-    live_pulled: pullR.live_pulled,
+    pulled: 0,
+    live_pulled: 0,
     pushed: pushR.pushed + supersededR,
     renamed: pushR.renamed,
     live_pushed: liveR,
     deleted: deletedR,
-    deletes_applied: pullR.deletes_applied,
+    deletes_applied: 0,
     assets_pushed: pushR.assets_pushed,
-    assets_pulled: pullR.assets_pulled,
+    assets_pulled: 0,
   };
 }
 
