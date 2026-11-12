@@ -2,6 +2,28 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.49.0 — 2026-11-12
+
+**Changed — Folio Cloud is now only a publishing transport (sc-24120, #125, merge `6298371b`).** The cloud no longer serves the notebook app, does not hand notes back to devices, and no longer pairs without a box key. What remains is push from the box plus public shares.
+
+### Removed
+
+- **Cloud notebook app (PWA):** `/`, `/pair`, `/manifest.webmanifest`, `/sw.js`, `/icons/folio.svg`, HTML shells `/n/:uuid` and `/t/:thread`, `/v1/feed`, authed `/raw/:uuid` and authed JSON `/t/:thread` (`src/cloud/pwa.ts`).
+- **Pull and live-stream:** `/v1/sync/pull`, `/v1/sync/live-stream` (and the query-string token), `src/cloud/sse-hub.ts`. Client `syncOnce` in `all` mode no longer pulls; `pulled` counters are always 0.
+- **Pairing without a box key:** `createPairingCode` without a key throws; `consumePairingCode` rejects codes with `expected_key = NULL`, including old codes still within TTL. `folio cloud pair-code` requires `--expect-key` (exit code 5 otherwise). Removed `/v1/auth/pair-code`, `/v1/admin/users/:id/pair-code`, `mint_pair_code`, and the viewer buttons "Generate code for another device" / "Mint pair-code".
+
+### Unchanged
+
+- `/v1/auth/pair` (key-bound code + proof of possession only), `/v1/auth/pin-key`, `/v1/auth/devices`, `DELETE /v1/auth/device/:id`, `/v1/sync/push`, `/v1/sync/assets/:hash`, `/p/:token/*` shares (OG, QR, pick), `/v1/share(s)`, `/v1/admin/*`. Publishing from the box (`prePushSharedScope`, `pushScopeSnapshot`) works as before.
+- Bearer devices paired before this release still authenticate; revoking them is a separate operational step.
+- Public asset routes `/u/:user/t/:thread/asset/:file` and legacy `/t/:thread/asset/:file` stay.
+
+### ⚠️ Side effects outside this repo — read before deploying folio-cloud
+
+- **Backplane `/api/folio/pair-code` returns 502** after folio-cloud is deployed on v0.49.0 whenever the request has no `bind_box_key` (or the box has no pinned identity key): it calls `folio cloud pair-code` without `--expect-key`, which now exits 5. Intended (decision A): a box without relay or without a pinned key can no longer pair. Backplane is not changed.
+- **notibox `scripts/test-folio-cloud-signer.sh` fails** against this version (it exercises "enable without gate" and builds bearer state via a keyless code + `/v1/sync/pull`). Needs a separate fix in notibox.
+- Data cleanup (backup of `cloud.sqlite`, deleting unshared notes, revoking devices) is not part of this release; it waits for restic backups on every box (sc-24119).
+
 ## v0.48.0 — 2026-11-06
 
 **Fixed — shared notes (`/p/<token>/n/<id>`): asset links and external links.** Two click bugs in the cloud share view.
