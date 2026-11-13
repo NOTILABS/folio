@@ -66,6 +66,7 @@ import {
 } from "./admin";
 import { createHash } from "node:crypto";
 import { rawNoteHeaders } from "../core/csp";
+import type { LiveEntry } from "../core/types";
 import { DEFAULT_SHARE_EXPIRES_DAYS } from "../core/config";
 import pkg from "../../package.json" with { type: "json" };
 
@@ -84,6 +85,39 @@ function sharedHeaders(): Record<string, string> {
     "X-Robots-Tag": "noindex, nofollow, noarchive",
     "Referrer-Policy": "no-referrer",
   };
+}
+
+/** Compile a note's cloud-side live_entries and splice them into its body. */
+async function spliceCloudLiveFeed(noteUuid: string, bodyHtml: string): Promise<string> {
+  const rows = cloudDb()
+    .query<
+      { id: string; ts: string; content_html: string; tags_json: string; occurred_at: string | null; refs_json: string; importance: number | null; source_ref: string | null },
+      [string]
+    >(
+      "SELECT id, ts, content_html, tags_json, occurred_at, refs_json, importance, source_ref FROM live_entries WHERE note_uuid = ? ORDER BY ts ASC"
+    )
+    .all(noteUuid);
+  const parse = (s: string): string[] => {
+    try {
+      const v = JSON.parse(s);
+      return Array.isArray(v) ? v : [];
+    } catch {
+      return [];
+    }
+  };
+  const entries: LiveEntry[] = rows.map((e) => ({
+    id: e.id,
+    ts: e.ts,
+    content_html: e.content_html,
+    tags: parse(e.tags_json),
+    refs: parse(e.refs_json),
+    ...(e.occurred_at ? { occurred_at: e.occurred_at } : {}),
+    ...(e.importance != null ? { importance: e.importance as NonNullable<LiveEntry["importance"]> } : {}),
+    ...(e.source_ref ? { source_ref: e.source_ref } : {}),
+  }));
+  const { compileRendered } = await import("../core/live");
+  const { renderFeedHtml, spliceFeedIntoBody } = await import("../core/feed-render");
+  return spliceFeedIntoBody(bodyHtml, renderFeedHtml(compileRendered(entries)));
 }
 
 /**
@@ -431,10 +465,13 @@ async function handleCapabilityRoute(req: Request, path: string, method: string,
       thread_id: string;
       summary: string | null;
       superseded_by: string | null;
+      live: number;
+      inline_render: number;
+      is_final: number;
     };
     const noteQuery = () =>
       cloudDb().query<CapabilityNoteRow, [string, string]>(
-        "SELECT uuid, title, theme, body_html, thread_id, summary, superseded_by FROM notes WHERE uuid = ? AND user_id = ?"
+        "SELECT uuid, title, theme, body_html, thread_id, summary, superseded_by, live, inline_render, is_final FROM notes WHERE uuid = ? AND user_id = ?"
       );
     let note = noteQuery().get(id, share.user_id);
     if (!note) return new Response("not found", { status: 404 });
@@ -485,7 +522,15 @@ async function handleCapabilityRoute(req: Request, path: string, method: string,
     // scope. Relative refs like `/t/X/asset/foo.png` become
     // `/p/<token>/t/X/asset/foo.png`. Absolute refs to viewer_public_url
     // get the same treatment by matching the path suffix.
-    const rewrittenBody = note.body_html.replace(
+    // Inline-rendered live notes: splice the pushed live_entries into the
+    // body's <section data-folio-live-feed> on every hit, like the local
+    // viewer does. There is no live stream on the cloud (sc-24120), so a
+    // recipient sees the feed as of the request; reloading shows new entries.
+    let shareBody = note.body_html;
+    if (note.live === 1 && note.inline_render === 1 && note.is_final === 0) {
+      shareBody = await spliceCloudLiveFeed(note.uuid, shareBody);
+    }
+    const rewrittenBody = shareBody.replace(
       /((?:href|src)\s*=\s*["'])([^"']*?)\/t\/([^/"']+)\/asset\/([^"'?#]+)(["'])/g,
       (_match, prefix: string, _leading: string, thread: string, filename: string, quote: string) =>
         `${prefix}/p/${token}/t/${thread}/asset/${filename}${quote}`

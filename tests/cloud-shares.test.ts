@@ -525,3 +525,72 @@ test("set-scoped share serves an asset from a linked note in another thread", as
   expect(asset.status).toBe(200);
   expect(new Uint8Array(await asset.arrayBuffer())).toEqual(bytes);
 });
+
+test("inline live note: /p/<token>/raw splices pushed live entries into the feed section", async () => {
+  const push = (body: unknown) =>
+    fetch(`${baseUrl}/v1/sync/push`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  await push({
+    notes: [
+      {
+        uuid: "01HXLIVE001",
+        slug: "live-report",
+        thread_id: "alpha-thread",
+        title: "Live report",
+        type: "journal",
+        body_html: "<h1>Report</h1>\n<section data-folio-live-feed></section>",
+        created_at: "2026-05-13T11:00:00Z",
+        live: 1,
+        inline_render: 1,
+      },
+    ],
+  });
+  await push({
+    live_entries: [
+      { id: "ent1", note_uuid: "01HXLIVE001", ts: "2026-05-13T11:01:00Z", content_html: '<div class="pomiar" data-pomiar="1"></div>' },
+      { id: "ent2", note_uuid: "01HXLIVE001", ts: "2026-05-13T11:02:00Z", content_html: '<div class="pomiar" data-pomiar="2"></div>' },
+    ],
+  });
+  const share = await createShare({ scope_type: "note", scope_id: "01HXLIVE001" });
+  const html = await (await fetch(`${baseUrl}/p/${share.token}/raw/01HXLIVE001`)).text();
+  expect(html).toContain('data-entry-id="ent1"');
+  expect(html).toContain('data-pomiar="2"');
+  const feed = html.slice(html.indexOf("data-folio-live-feed"));
+  expect(feed.indexOf('data-pomiar="1"')).toBeGreaterThan(0);
+
+  // A third entry pushed later shows up on the next hit, without a new share.
+  await push({
+    live_entries: [{ id: "ent3", note_uuid: "01HXLIVE001", ts: "2026-05-13T11:03:00Z", content_html: '<p>trzeci</p>' }],
+  });
+  const again = await (await fetch(`${baseUrl}/p/${share.token}/raw/01HXLIVE001`)).text();
+  expect(again).toContain("trzeci");
+});
+
+test("non-inline live note: /p/<token>/raw leaves the body untouched", async () => {
+  await fetch(`${baseUrl}/v1/sync/push`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      notes: [
+        {
+          uuid: "01HXLIVE002",
+          slug: "live-panel",
+          thread_id: "alpha-thread",
+          title: "Live panel",
+          type: "journal",
+          body_html: "<h1>Panel</h1>",
+          created_at: "2026-05-13T11:00:00Z",
+          live: 1,
+        },
+      ],
+      live_entries: [{ id: "entA", note_uuid: "01HXLIVE002", ts: "2026-05-13T11:01:00Z", content_html: "<p>sekret panelu</p>" }],
+    }),
+  });
+  const share = await createShare({ scope_type: "note", scope_id: "01HXLIVE002" });
+  const html = await (await fetch(`${baseUrl}/p/${share.token}/raw/01HXLIVE002`)).text();
+  expect(html).toContain("<h1>Panel</h1>");
+  expect(html).not.toContain("sekret panelu");
+});
