@@ -594,6 +594,11 @@ export async function pushSupersedes(state: SyncState, selfDeviceId: string): Pr
 
 // ----- Push live entries -----
 
+/** Sort key for the live-entry push cursor: ISO ts, then id as tie-break. */
+export function liveCursorKey(e: { ts: string; id: string }): string {
+  return `${e.ts}|${e.id}`;
+}
+
 export async function pushLiveEntries(
   state: SyncState,
   selfDeviceId: string,
@@ -621,10 +626,13 @@ export async function pushLiveEntries(
     const jsonlPath = entriesPath(join(folioRoot(), n.path));
     if (!existsSync(jsonlPath)) continue;
     const entries = readEntries(jsonlPath);
+    // Cursor = "<ts>|<id>" of the newest pushed entry. Entry ids are the
+    // RANDOM tail of a ulid (newEntryId), so comparing ids alone skipped
+    // roughly half of new entries for good. A legacy cursor (bare id, no
+    // "|") re-pushes the whole feed once; the cloud dedups on (note, id).
     const lastPushed = state.last_live_pushed?.[n.id] ?? "";
-    // Entry ids are time-sortable (ulid suffix). Push everything after lastPushed.
-    // For a fresh sync, lastPushed = "" so we push all.
-    const fresh = entries.filter((e) => e.id > lastPushed);
+    const cursor = lastPushed.includes("|") ? lastPushed : "";
+    const fresh = entries.filter((e) => liveCursorKey(e) > cursor);
     for (const e of fresh) {
       allEntries.push({
         id: e.id,
@@ -638,10 +646,8 @@ export async function pushLiveEntries(
         source_ref: e.source_ref ?? null,
       });
     }
-    // Track the highest id we'll push (lexicographic ulid sort = chronological).
     if (fresh.length > 0) {
-      const maxId = fresh.reduce((acc, e) => (e.id > acc ? e.id : acc), lastPushed);
-      lastByNote[n.id] = maxId;
+      lastByNote[n.id] = fresh.reduce((acc, e) => (liveCursorKey(e) > acc ? liveCursorKey(e) : acc), cursor);
     }
   }
 
