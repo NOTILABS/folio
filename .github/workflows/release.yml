@@ -122,4 +122,4 @@ jobs:
           files: artifacts/*.tar.gz
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: true
