@@ -2,6 +2,10 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.48.1 — 2026-11-13 (prerelease, tylko Folio Cloud)
+
+**Fixed — udostępniona notatka live (inline) pokazuje wpisy.** `/p/<token>/raw/<uuid>` wkleja `live_entries` do `<section data-folio-live-feed>` przy każdym wejściu, tak jak lokalny viewer. Nowe wpisy widać po przeładowaniu, SSE nie ma. Poprawka wydana z gałęzi `v0.48.0` dla chmury (stoi na v0.48.x), jako prerelease, żeby nie przeszła przez OTA floty. Ten sam kod trafia na `main` w PR #127.
+
 ## v0.48.0 — 2026-11-06
 
 **Fixed — shared notes (`/p/<token>/n/<id>`): asset links and external links.** Two click bugs in the cloud share view.
