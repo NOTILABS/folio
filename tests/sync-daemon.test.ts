@@ -270,6 +270,61 @@ test("live entries push: appended entries land in cloud after syncOnce", async (
   expect(r2.live_pushed).toBe(0);
 });
 
+test("live entries push: an entry whose id sorts below the cursor still lands (ids are random)", async () => {
+  const { createNote } = await import("../src/core/storage");
+  const { entriesPath } = await import("../src/core/live");
+  const { loadSyncState, syncOnce } = await import("../src/core/sync");
+  const { appendFileSync } = await import("node:fs");
+
+  const note = await createNote({
+    type: "journal",
+    title: "Live ids",
+    body_html: "<p>chrome</p>",
+    thread_id: "ids",
+    live: true,
+  });
+  const jsonl = entriesPath(join(homeDir, note.path));
+  const line = (id: string, ts: string) =>
+    JSON.stringify({ id, ts, content_html: `<p>${id}</p>`, tags: [] }) + "\n";
+  // newEntryId() is the random tail of a ulid: a later entry may sort lower.
+  appendFileSync(jsonl, line("zzzzzzzzzz", "2026-11-13T22:00:00.000Z"));
+  const state = loadSyncState()!;
+  expect((await syncOnce(state)).live_pushed).toBe(1);
+
+  appendFileSync(jsonl, line("aaaaaaaaaa", "2026-11-13T22:00:01.000Z"));
+  expect((await syncOnce(state)).live_pushed).toBe(1);
+
+  const { cloudDb } = await import("../src/cloud/db");
+  const ids = cloudDb()
+    .query<{ id: string }, [string]>("SELECT id FROM live_entries WHERE note_uuid = ? ORDER BY id")
+    .all(note.id)
+    .map((r) => r.id);
+  expect(ids).toEqual(["aaaaaaaaaa", "zzzzzzzzzz"]);
+  expect((await syncOnce(state)).live_pushed).toBe(0);
+});
+
+test("live entries push: a legacy bare-id cursor re-pushes the feed once", async () => {
+  const { createNote } = await import("../src/core/storage");
+  const { appendEntry, entriesPath } = await import("../src/core/live");
+  const { loadSyncState, syncOnce } = await import("../src/core/sync");
+
+  const note = await createNote({
+    type: "journal",
+    title: "Live legacy",
+    body_html: "<p>chrome</p>",
+    thread_id: "legacy",
+    live: true,
+  });
+  const jsonl = entriesPath(join(homeDir, note.path));
+  appendEntry(jsonl, { content_html: "<p>one</p>", tags: [] });
+  appendEntry(jsonl, { content_html: "<p>two</p>", tags: [] });
+  const state = loadSyncState()!;
+  state.last_live_pushed = { [note.id]: "zzzzzzzzzz" };
+  expect((await syncOnce(state)).live_pushed).toBe(2);
+  expect(state.last_live_pushed[note.id]).toContain("|");
+  expect((await syncOnce(state)).live_pushed).toBe(0);
+});
+
 test("pre-W2 note without origin_device_id pushes successfully (NULL → self assumed)", async () => {
   // Simulate a row that existed before the W2 migration ran (origin_device_id
   // NULL). createNote always stamps it, so we mutate after creation to set up
