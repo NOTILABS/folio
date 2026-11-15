@@ -2,6 +2,15 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.49.1 — 2026-11-15
+
+Prerelease (poza OTA floty): klient na Macu z poprawką sync wpisów live.
+
+### Fixed
+
+- **Share: notatka live inline pokazuje wpisy pod `/p/<token>/raw`** (sc-34503, #127).
+- **Sync gubił wpisy live:** kursor `last_live_pushed` porównywał losowe id wpisów jak rosnące; połowa nowych wpisów nie trafiała do chmury (sc-34503, #127).
+
 ## v0.49.0 — 2026-11-12
 
 **Changed — Folio Cloud is now only a publishing transport (sc-24120, #125, merge `6298371b`).** The cloud no longer serves the notebook app, does not hand notes back to devices, and no longer pairs without a box key. What remains is push from the box plus public shares.
