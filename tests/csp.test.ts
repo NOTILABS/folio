@@ -47,6 +47,18 @@ test("/raw/:id sends strict CSP + sandbox headers", async () => {
   expect(res.headers.get("referrer-policy")).toBe("no-referrer");
 });
 
+test("authed /raw/:id keeps frame-ancestors 'self' only (share relaxation stays on /p/)", async () => {
+  const { RAW_NOTE_CSP, SHARED_RAW_NOTE_CSP, sharedNoteHeaders, rawNoteHeaders } = await import("../src/core/csp");
+  expect(RAW_NOTE_CSP).toContain("frame-ancestors 'self';");
+  expect(RAW_NOTE_CSP).not.toContain("https: http://localhost");
+  expect(rawNoteHeaders()["X-Frame-Options"]).toBe("SAMEORIGIN");
+  // Shared CSP differs from the authed one ONLY in frame-ancestors.
+  const strip = (c: string) => c.split("; ").filter((d) => !d.startsWith("frame-ancestors")).join("; ");
+  expect(strip(SHARED_RAW_NOTE_CSP)).toBe(strip(RAW_NOTE_CSP));
+  expect(SHARED_RAW_NOTE_CSP).not.toBe(RAW_NOTE_CSP);
+  expect(sharedNoteHeaders()["X-Frame-Options"]).toBeUndefined();
+});
+
 test("/raw/:id 404 path returns plain text without CSP", async () => {
   const res = await fetch(`http://${server!.hostname}:${server!.port}/raw/nonexistent`);
   expect(res.status).toBe(404);

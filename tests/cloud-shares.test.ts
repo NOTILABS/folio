@@ -128,6 +128,23 @@ test("/p/<token>/raw/<uuid> renders body with locked CSP", async () => {
   expect(body).toContain("<h1>Alpha</h1>");
 });
 
+test("/p/<token>/raw/<uuid> can be framed by Kokpit (sc-37038)", async () => {
+  // Kokpit frames /p/<token>/n/<uuid>, which frames this body. frame-ancestors
+  // checks every ancestor, so 'self' alone left an empty "refused to connect"
+  // frame in Kokpit's side panel. Isolation stays: connect-src 'none'.
+  const s = await createShare({ scope_type: "note", scope_id: "01HXNOTE001" });
+  const r = await fetch(`${baseUrl}/p/${s.token}/raw/01HXNOTE001`);
+  expect(r.status).toBe(200);
+  const csp = r.headers.get("content-security-policy") ?? "";
+  const fa = csp.split(";").map((d) => d.trim()).filter((d) => d.startsWith("frame-ancestors"));
+  expect(fa).toEqual(["frame-ancestors 'self' https: http://localhost:* http://127.0.0.1:*"]);
+  expect(csp).toContain("connect-src 'none'");
+  expect(csp).toContain("form-action 'none'");
+  // SAMEORIGIN would veto the wider frame-ancestors in browsers that read it.
+  expect(r.headers.get("x-frame-options")).toBeNull();
+  expect(r.headers.get("referrer-policy")).toBe("no-referrer");
+});
+
 test("/p/<token>/n/<other-uuid> rejected (scope mismatch)", async () => {
   const s = await createShare({ scope_type: "note", scope_id: "01HXNOTE001" });
   const r = await fetch(`${baseUrl}/p/${s.token}/n/01HXNOTE002`);

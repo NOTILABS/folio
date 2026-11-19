@@ -65,7 +65,7 @@ import {
   AdminError,
 } from "./admin";
 import { createHash } from "node:crypto";
-import { rawNoteHeaders } from "../core/csp";
+import { sharedNoteHeaders } from "../core/csp";
 import type { LiveEntry } from "../core/types";
 import { DEFAULT_SHARE_EXPIRES_DAYS } from "../core/config";
 import pkg from "../../package.json" with { type: "json" };
@@ -78,13 +78,9 @@ function json(body: unknown, status = 200, extraHeaders: Record<string, string> 
 }
 
 function sharedHeaders(): Record<string, string> {
-  // Same CSP as authed /raw/, plus belt-and-braces no-index + no-referrer to
-  // limit capability-URL leakage via search engines and external Referers.
-  return {
-    ...rawNoteHeaders(),
-    "X-Robots-Tag": "noindex, nofollow, noarchive",
-    "Referrer-Policy": "no-referrer",
-  };
+  // Locked CSP of /raw/ with frame-ancestors opened for Kokpit (sc-37038),
+  // plus no-index + no-referrer against capability-URL leakage.
+  return sharedNoteHeaders();
 }
 
 /** Compile a note's cloud-side live_entries and splice them into its body. */

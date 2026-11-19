@@ -35,13 +35,34 @@ export function rawNoteHeaders(): Record<string, string> {
 }
 
 /**
- * Headers for capability-URL responses (`/p/:token/...` in cloud relay, W4).
- * Same CSP as the local raw-note route — published note must not behave
- * differently from a privately viewed one. Adds noindex + tightens referrer.
+ * Origins allowed to frame a capability-URL note body (`/p/:token/raw/:id`).
+ *
+ * Kokpit (any gateway — Tailscale/box over https, the Mac on loopback http)
+ * shows a shared note in its side panel by framing `/p/:token/n/:id` with
+ * allow-same-origin, and that page frames `/p/:token/raw/:id`. CSP
+ * frame-ancestors checks EVERY ancestor, so `'self'` alone blocked the body as
+ * soon as the outer page sat inside Kokpit ("refused to connect", sc-37038).
+ *
+ * Why this is safe for share routes only: the URL is already a bearer
+ * capability (anyone holding it can open the note), the body is read-only, and
+ * the isolation that matters — null-origin sandbox + `connect-src 'none'` —
+ * is unchanged. The authed `/raw/:id` keeps `frame-ancestors 'self'`.
+ */
+export const SHARED_FRAME_ANCESTORS = "frame-ancestors 'self' https: http://localhost:* http://127.0.0.1:*";
+
+export const SHARED_RAW_NOTE_CSP = RAW_NOTE_CSP.replace("frame-ancestors 'self'", SHARED_FRAME_ANCESTORS);
+
+/**
+ * Headers for capability-URL responses (`/p/:token/raw/...` in cloud relay).
+ * Same CSP as the local raw-note route except frame-ancestors (see above);
+ * no X-Frame-Options, because SAMEORIGIN would veto the wider frame-ancestors
+ * in browsers that still consult it. Adds noindex + tightens referrer.
  */
 export function sharedNoteHeaders(): Record<string, string> {
+  const { "X-Frame-Options": _xfo, ...base } = rawNoteHeaders();
   return {
-    ...rawNoteHeaders(),
+    ...base,
+    "Content-Security-Policy": SHARED_RAW_NOTE_CSP,
     "X-Robots-Tag": "noindex, nofollow, noarchive",
     "Referrer-Policy": "no-referrer",
   };
