@@ -2,6 +2,32 @@
 
 All notable changes per release. The latest version is documented in [README.md](README.md). Older entries here for reference.
 
+## v0.49.2 — 2026-11-19
+
+**Fixed — shared notes can be embedded in Kokpit (sc-37038, #128, merge `0269c06d`).** Kokpit shows a shared note in its side panel by framing `https://folio.notibox.ai/p/<token>/n/<id>`, which in turn frames `/p/<token>/raw/<id>`. `/raw` answered with `frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN`; both check every ancestor, so with Kokpit on top the content frame stayed blank ("folio.notibox.ai refused to connect").
+
+### Fixed
+
+- **`/p/<token>/raw/<id>` allows framing from https and localhost.** New `SHARED_RAW_NOTE_CSP` = `RAW_NOTE_CSP` with `frame-ancestors 'self' https: http://localhost:* http://127.0.0.1:*`; `sharedNoteHeaders()` drops `X-Frame-Options` (`src/core/csp.ts`, `src/cloud/server.ts`).
+
+### Unchanged
+
+- `connect-src 'none'`, `form-action 'none'` and the null-origin sandbox of the inner frame. The authed `/raw/:id` (local viewer and cloud) stays `frame-ancestors 'self'` + XFO. Only share URLs, which are already capabilities and read-only, are widened.
+
+### Release notes
+
+- `v0.49.1` was cut from a branch off `e5aeff4` (#127) as a prerelease outside fleet OTA and does not contain #128; `main` jumps from `0.49.0` straight to `0.49.2`. Its changelog entry is carried over below for history.
+- The fix is server-side: it reaches Kokpit only after folio-cloud on `folio.notibox.ai` is deployed on v0.49.2 (separate step after the Release).
+
+## v0.49.1 — 2026-11-15
+
+Prerelease (outside fleet OTA): Mac client with the live-entry sync fix. Cut from `release/v0.49.1` (not merged to `main`).
+
+### Fixed
+
+- **Share: inline live notes show their entries under `/p/<token>/raw`** (sc-34503, #127).
+- **Sync dropped live entries:** the `last_live_pushed` cursor compared random entry ids as if they were increasing, so about half of new entries never reached the cloud (sc-34503, #127).
+
 ## v0.49.0 — 2026-11-12
 
 **Changed — Folio Cloud is now only a publishing transport (sc-24120, #125, merge `6298371b`).** The cloud no longer serves the notebook app, does not hand notes back to devices, and no longer pairs without a box key. What remains is push from the box plus public shares.
